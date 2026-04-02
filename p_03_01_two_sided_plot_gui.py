@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Standalone GUI wrapper for two_sided_plot_core.py (two-sided microfractionation plot).
+Standalone GUI wrapper for p_03_00_two_sided_plot_core.py (two-sided microfractionation plot).
 
 This file only provides a sleek Tkinter UI (gray/blue theme) and calls:
-    from two_sided_plot_core import make_two_sided_plot
+    from p_03_00_two_sided_plot_core import make_two_sided_plot
 
 Inputs:
 - chromatogram mzML (sample raw file)
@@ -21,17 +21,17 @@ import sys
 import threading
 from pathlib import Path
 
-# Ensure we can import two_sided_plot_core.py when this GUI is placed next to it
+# Ensure we can import p_03_00_two_sided_plot_core.py when this GUI is placed next to it
 _THIS_DIR = Path(__file__).resolve().parent
 if str(_THIS_DIR) not in sys.path:
     sys.path.insert(0, str(_THIS_DIR))
 
 try:
-    from two_sided_plot_core import make_two_sided_plot, slugify  # type: ignore
+    from p_03_00_two_sided_plot_core import make_two_sided_plot, slugify  # type: ignore
 except Exception as e:  # pragma: no cover
     raise SystemExit(
-        "ERROR: Could not import 'two_sided_plot_core.py'.\n"
-        "Place this GUI script in the same folder as two_sided_plot_core.py, "
+        "ERROR: Could not import 'p_03_00_two_sided_plot_core.py'.\n"
+        "Place this GUI script in the same folder as p_03_00_two_sided_plot_core.py, "
         "or ensure that folder is on PYTHONPATH.\n\n"
         f"Details: {e}"
     )
