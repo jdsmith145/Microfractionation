@@ -1,858 +1,137 @@
 #!/usr/bin/env python3
-"""GUI application for plant bioactivity plotting.
+"""CustomTkinter GUI for plant bioactivity plotting.
+
+Script 0 GUI, modernized to follow the design pattern used in script 5:
+- Workflow / Preview-column picker / Figures / Log tabs
+- In-window help bubbles
+- Toast-style user notifications
+- Publication-friendly dark UI with separated cards
 
 Examples
 --------
 python p_00_01_plant_bioactivity_gui.py
 python p_00_01_plant_bioactivity_gui.py --input data/plant_extract_fluorescence_graph.xlsx
 """
-
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
-from pathlib import Path
+import os
+import queue
+import subprocess
 import sys
-import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
-from tkinter.scrolledtext import ScrolledText
+import threading
+import traceback
+from datetime import datetime
+from pathlib import Path
+from typing import Any
 
+import matplotlib.pyplot as plt
 import pandas as pd
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
-import matplotlib.pyplot as plt
+
+_THIS_DIR = Path(__file__).resolve().parent
+if str(_THIS_DIR) not in sys.path:
+    sys.path.insert(0, str(_THIS_DIR))
+
+try:
+    import p_00_00_plant_bioactivity_core as core  # type: ignore
+except Exception as e:  # pragma: no cover
+    raise SystemExit(
+        "ERROR: Could not import p_00_00_plant_bioactivity_core.py.\n"
+        "Place this GUI script in the same folder as p_00_00_plant_bioactivity_core.py.\n\n"
+        f"Details: {e}"
+    )
 
 
-BG = "#262a30"
-PANEL = "#31363d"
-PANEL_ALT = "#3a4048"
-ENTRY_BG = "#20242a"
-FG = "#eef3f8"
-MUTED = "#b5bfcb"
-BLUE = "#4c86ff"
-BLUE_DARK = "#2f69e1"
-BORDER = "#4d5562"
-SUCCESS = "#2ca96b"
-WARNING = "#d7a53f"
+def main() -> int:
+    try:
+        import tkinter as tk
+        from tkinter import filedialog, messagebox
+    except Exception as e:
+        print("ERROR: Tkinter is not available in this Python environment.", file=sys.stderr)
+        print(f"Details: {e}", file=sys.stderr)
+        return 2
 
+    try:
+        import customtkinter as ctk
+    except Exception as e:
+        print(
+            "ERROR: CustomTkinter is not installed.\n"
+            "Install it in your environment with: pip install customtkinter",
+            file=sys.stderr,
+        )
+        print(f"Details: {e}", file=sys.stderr)
+        return 2
 
-def load_core_module(core_path: Path):
-    spec = importlib.util.spec_from_file_location("plant_bioactivity_core", core_path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Could not load core module from: {core_path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    ctk.set_appearance_mode("dark")
+    ctk.set_default_color_theme("blue")
 
+    COLORS = {
+        "bg": "#17191d",
+        "surface": "#20242a",
+        "card": "#252a31",
+        "card_alt": "#2d333c",
+        "entry": "#191d22",
+        "border": "#3d4652",
+        "text": "#f3f6fa",
+        "muted": "#aab4c0",
+        "accent": "#2563eb",
+        "accent_hover": "#3b82f6",
+        "success": "#2f8f5b",
+        "success_hover": "#37a96a",
+        "warning": "#b7791f",
+        "danger": "#b54848",
+        "danger_hover": "#9e3b3b",
+        "tile_selected": "#1d5fc4",
+    }
 
-class BioactivityGUI:
-    def __init__(self, root: tk.Tk, core_module, initial_input: str | None = None) -> None:
-        self.root = root
-        self.core = core_module
-        self.current_figure = None
-        self.canvas_widget = None
-        self.toolbar = None
-        self.input_columns: list[str] = []
-        self.order_columns: list[str] = []
-        self.script_dir = Path(__file__).resolve().parent
-        self.default_output_prefix = self.script_dir / "output" / "plant_bioactivity"
-        self.state_file = self.script_dir / ".p_00_01_plant_bioactivity_gui_state.json"
-        self.state = self._load_state()
+    FONT_HEADER = ("Segoe UI", 23, "bold")
+    FONT_SUBTITLE = ("Segoe UI", 12)
+    FONT_CARD_TITLE = ("Segoe UI", 15, "bold")
+    FONT_LABEL = ("Segoe UI", 12)
+    FONT_SMALL = ("Segoe UI", 11)
+    FONT_MONO = ("Consolas", 11)
 
-        self.root.title("Plant bioactivity plotter")
-        self.root.geometry("1480x920")
-        self.root.minsize(1260, 780)
-        self.root.configure(bg=BG)
+    TABLE_PATTERNS = [("Tables", "*.csv *.tsv *.txt *.xlsx *.xls"), ("All files", "*.*")]
+    CONFIG_PATTERNS = [("JSON configuration", "*.json"), ("All files", "*.*")]
+    APP_STATE_FILE = _THIS_DIR / ".p_00_01_plant_bioactivity_gui_ctk_state.json"
 
-        self._create_style()
-        self._build_variables(initial_input)
-        self._build_layout()
-        self._restore_state_defaults()
-        if self.input_path_var.get().strip():
-            self.load_input_columns(auto_log=False)
+    def load_state() -> dict[str, Any]:
+        if APP_STATE_FILE.exists():
+            try:
+                return json.loads(APP_STATE_FILE.read_text(encoding="utf-8"))
+            except Exception:
+                return {}
+        return {}
 
-    def _create_style(self) -> None:
-        style = ttk.Style(self.root)
+    def save_state(data: dict[str, Any]) -> None:
         try:
-            style.theme_use("clam")
-        except tk.TclError:
-            pass
-
-        style.configure("Dark.TNotebook", background=BG, borderwidth=0)
-        style.configure(
-            "Dark.TNotebook.Tab",
-            background=PANEL_ALT,
-            foreground=FG,
-            padding=(16, 8),
-            borderwidth=0,
-        )
-        style.map(
-            "Dark.TNotebook.Tab",
-            background=[("selected", BLUE_DARK), ("active", PANEL)],
-            foreground=[("selected", "white")],
-        )
-
-        style.configure(
-            "Dark.TCombobox",
-            fieldbackground=ENTRY_BG,
-            background=PANEL_ALT,
-            foreground=FG,
-            arrowcolor=FG,
-            bordercolor=BORDER,
-            lightcolor=BORDER,
-            darkcolor=BORDER,
-            padding=4,
-        )
-        style.map(
-            "Dark.TCombobox",
-            fieldbackground=[("readonly", ENTRY_BG)],
-            background=[("readonly", ENTRY_BG)],
-            foreground=[("readonly", FG)],
-            selectbackground=[("readonly", ENTRY_BG)],
-            selectforeground=[("readonly", FG)],
-        )
-
-    def _build_variables(self, initial_input: str | None) -> None:
-        last_input = initial_input or self.state.get("input_path", "")
-        self.input_path_var = tk.StringVar(value=last_input)
-        self.order_path_var = tk.StringVar(value=self.state.get("order_path", ""))
-        self.sample_column_var = tk.StringVar(value=self.state.get("sample_column", ""))
-        self.order_column_var = tk.StringVar(value=self.state.get("order_column", ""))
-
-        self.control_mode_var = tk.StringVar(value=self.state.get("control_mode", "None"))
-        self.control_entry_1_var = tk.StringVar(value=self.state.get("control_entry_1", ""))
-        self.control_entry_2_var = tk.StringVar(value=self.state.get("control_entry_2", ""))
-
-        self.use_threshold_var = tk.BooleanVar(value=bool(self.state.get("use_threshold", False)))
-        self.threshold_var = tk.StringVar(value=self.state.get("threshold", ""))
-        self.threshold_mode_var = tk.StringVar(value=self.state.get("threshold_mode", "ge"))
-        self.exclude_control_var = tk.BooleanVar(value=bool(self.state.get("exclude_control", True)))
-
-        self.export_table_var = tk.BooleanVar(value=bool(self.state.get("export_table", True)))
-        self.export_png_var = tk.BooleanVar(value=bool(self.state.get("export_png", True)))
-        self.export_svg_var = tk.BooleanVar(value=bool(self.state.get("export_svg", True)))
-
-        self.output_prefix_var = tk.StringVar(
-            value=self.state.get("output_prefix", str(self.default_output_prefix))
-        )
-        self.title_var = tk.StringVar(value=self.state.get("title", "Sample activity"))
-        self.ylabel_var = tk.StringVar(value=self.state.get("ylabel", ""))
-        self.figure_width_var = tk.StringVar(value=self.state.get("figure_width", "16"))
-        self.figure_height_var = tk.StringVar(value=self.state.get("figure_height", "6"))
-        self.rotate_var = tk.StringVar(value=self.state.get("rotate", "45"))
-        self.font_family_var = tk.StringVar(value=self.state.get("font_family", "Arial"))
-        self.title_size_var = tk.StringVar(value=self.state.get("title_size", "16"))
-        self.axis_label_size_var = tk.StringVar(value=self.state.get("axis_label_size", "20"))
-        self.xtick_label_size_var = tk.StringVar(value=self.state.get("xtick_label_size", "8"))
-        self.ytick_label_size_var = tk.StringVar(value=self.state.get("ytick_label_size", "16"))
-        self.legend_size_var = tk.StringVar(value=self.state.get("legend_size", "12"))
-        self.status_var = tk.StringVar(value="Ready.")
-        self.preview_summary_var = tk.StringVar(
-            value="Load a table, choose columns, and preview the figure here."
-        )
-
-        self.replicate_listbox = None
-        self.sample_combo = None
-        self.order_combo = None
-        self.control_label_1 = None
-        self.control_label_2 = None
-        self.control_entry_1 = None
-        self.control_entry_2 = None
-        self.threshold_entry = None
-        self.threshold_mode_combo = None
-        self.log_text = None
-        self.preview_frame = None
-        self.preview_hint = None
-
-    def _build_layout(self) -> None:
-        outer = tk.Frame(self.root, bg=BG)
-        outer.pack(fill="both", expand=True, padx=12, pady=12)
-
-        self._build_header(outer)
-        self._build_toolbar(outer)
-
-        body = tk.PanedWindow(outer, orient="horizontal", bg=BG, sashwidth=8, bd=0, relief="flat")
-        body.pack(fill="both", expand=True)
-
-        left = tk.Frame(body, bg=BG, width=560)
-        right = tk.Frame(body, bg=BG)
-        body.add(left, minsize=520)
-        body.add(right, minsize=520)
-
-        self._build_left_panel(left)
-        self._build_right_panel(right)
-
-        footer = tk.Frame(outer, bg=BG)
-        footer.pack(fill="x", pady=(10, 0))
-        tk.Label(footer, textvariable=self.status_var, bg=BG, fg=MUTED, anchor="w").pack(side="left")
-
-    def _build_header(self, parent: tk.Widget) -> None:
-        header = tk.Frame(parent, bg=BG)
-        header.pack(fill="x", pady=(0, 10))
-
-        tk.Label(
-            header,
-            text="Plant bioactivity plotter",
-            bg=BG,
-            fg=FG,
-            font=("Segoe UI", 16, "bold"),
-            anchor="w",
-        ).pack(anchor="w")
-        tk.Label(
-            header,
-            text=(
-                "GUI-first application for end-users. Pick a table, choose columns, preview the plot, "
-                "then export only the outputs you want."
-            ),
-            bg=BG,
-            fg=MUTED,
-            anchor="w",
-            justify="left",
-        ).pack(anchor="w", pady=(2, 0))
-
-    def _build_toolbar(self, parent: tk.Widget) -> None:
-        bar = tk.Frame(parent, bg=BG)
-        bar.pack(fill="x", pady=(0, 10))
-
-        self._make_button(bar, "Preview figure", self.preview_figure).pack(side="left", padx=(0, 8))
-        self._make_button(bar, "Run + export", self.run_and_export, primary=True).pack(side="left", padx=(0, 8))
-        self._make_button(bar, "Load columns", self.load_input_columns, secondary=True).pack(side="left", padx=(0, 8))
-        self._make_button(bar, "Reset", self.reset_form, secondary=True).pack(side="left", padx=(0, 8))
-        self._make_button(bar, "Close", self.root.destroy, secondary=True).pack(side="right")
-
-    def _build_left_panel(self, parent: tk.Widget) -> None:
-        notebook = ttk.Notebook(parent, style="Dark.TNotebook")
-        notebook.pack(fill="both", expand=True)
-
-        self.tab_data = tk.Frame(notebook, bg=BG)
-        self.tab_controls = tk.Frame(notebook, bg=BG)
-        self.tab_plot = tk.Frame(notebook, bg=BG)
-
-        notebook.add(self.tab_data, text="Data")
-        notebook.add(self.tab_controls, text="Controls")
-        notebook.add(self.tab_plot, text="Plot & Export")
-
-        self._build_data_tab(self.tab_data)
-        self._build_controls_tab(self.tab_controls)
-        self._build_plot_tab(self.tab_plot)
-
-    def _build_right_panel(self, parent: tk.Widget) -> None:
-        split = tk.PanedWindow(parent, orient="vertical", bg=BG, sashwidth=8, bd=0, relief="flat")
-        split.pack(fill="both", expand=True)
-
-        preview_panel = tk.Frame(split, bg=PANEL, highlightbackground=BORDER, highlightthickness=1)
-        info_panel = tk.Frame(split, bg=PANEL, highlightbackground=BORDER, highlightthickness=1)
-        split.add(preview_panel, minsize=420)
-        split.add(info_panel, minsize=220)
-
-        tk.Label(
-            preview_panel,
-            text="Figure preview",
-            bg=BLUE_DARK,
-            fg="white",
-            anchor="w",
-            font=("Segoe UI", 11, "bold"),
-            padx=12,
-            pady=8,
-        ).pack(fill="x")
-
-        summary = tk.Label(
-            preview_panel,
-            textvariable=self.preview_summary_var,
-            bg=PANEL,
-            fg=MUTED,
-            anchor="w",
-            justify="left",
-            wraplength=700,
-            padx=12,
-            pady=10,
-        )
-        summary.pack(fill="x")
-
-        self.preview_frame = tk.Frame(preview_panel, bg="white")
-        self.preview_frame.pack(fill="both", expand=True, padx=12, pady=(0, 12))
-
-        self.preview_hint = tk.Label(
-            self.preview_frame,
-            text="No preview yet.",
-            bg="white",
-            fg="#404040",
-            font=("Segoe UI", 13),
-        )
-        self.preview_hint.pack(expand=True)
-
-        tk.Label(
-            info_panel,
-            text="Run log",
-            bg=BLUE_DARK,
-            fg="white",
-            anchor="w",
-            font=("Segoe UI", 11, "bold"),
-            padx=12,
-            pady=8,
-        ).pack(fill="x")
-
-        self.log_text = ScrolledText(
-            info_panel,
-            height=10,
-            bg=ENTRY_BG,
-            fg=FG,
-            insertbackground=FG,
-            relief="flat",
-            highlightbackground=BORDER,
-            highlightthickness=1,
-            font=("Consolas", 10),
-        )
-        self.log_text.pack(fill="both", expand=True, padx=12, pady=12)
-        self.log("Ready.")
-
-    def _section(self, parent: tk.Widget, title: str, subtitle: str | None = None) -> tk.Frame:
-        frame = tk.Frame(parent, bg=PANEL, highlightbackground=BORDER, highlightthickness=1)
-        frame.pack(fill="x", pady=(0, 10), padx=2)
-
-        tk.Label(
-            frame,
-            text=title,
-            bg=BLUE_DARK,
-            fg="white",
-            anchor="w",
-            font=("Segoe UI", 11, "bold"),
-            padx=12,
-            pady=8,
-        ).pack(fill="x")
-
-        if subtitle:
-            tk.Label(
-                frame,
-                text=subtitle,
-                bg=PANEL,
-                fg=MUTED,
-                anchor="w",
-                justify="left",
-                wraplength=500,
-                padx=12,
-                pady=8,
-            ).pack(fill="x")
-
-        inner = tk.Frame(frame, bg=PANEL, padx=12, pady=12)
-        inner.pack(fill="both", expand=True)
-        return inner
-
-    def _build_data_tab(self, parent: tk.Widget) -> None:
-        sec1 = self._section(
-            parent,
-            "Input table",
-            "Choose the main Excel/CSV file. The GUI can then read the headers and let the user select columns.",
-        )
-        for col in range(4):
-            sec1.grid_columnconfigure(col, weight=1 if col in {0, 1, 2} else 0)
-
-        self._make_label(sec1, "Input file").grid(row=0, column=0, sticky="w")
-        self._make_entry(sec1, self.input_path_var).grid(row=1, column=0, columnspan=2, sticky="ew", padx=(0, 8), pady=(4, 10), ipady=4)
-        self._make_button(sec1, "Browse", self.browse_input, secondary=True).grid(row=1, column=2, sticky="ew", padx=(0, 8), pady=(4, 10))
-        self._make_button(sec1, "Load columns", self.load_input_columns, primary=True).grid(row=1, column=3, sticky="ew", pady=(4, 10))
-
-        self._make_label(sec1, "Sample / species column").grid(row=2, column=0, sticky="w")
-        self.sample_combo = ttk.Combobox(sec1, textvariable=self.sample_column_var, state="readonly", style="Dark.TCombobox")
-        self.sample_combo.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(4, 10))
-
-        self._make_label(sec1, "Replicate columns").grid(row=4, column=0, sticky="w")
-        tk.Label(
-            sec1,
-            text="Use Ctrl/Shift to select multiple replicate columns.",
-            bg=PANEL,
-            fg=MUTED,
-            anchor="w",
-        ).grid(row=5, column=0, columnspan=4, sticky="w")
-
-        listbox_wrap = tk.Frame(sec1, bg=PANEL)
-        listbox_wrap.grid(row=6, column=0, columnspan=4, sticky="ew", pady=(6, 10))
-        listbox_wrap.grid_columnconfigure(0, weight=1)
-
-        self.replicate_listbox = tk.Listbox(
-            listbox_wrap,
-            selectmode="extended",
-            height=8,
-            bg=ENTRY_BG,
-            fg=FG,
-            selectbackground=BLUE,
-            selectforeground="white",
-            highlightbackground=BORDER,
-            highlightthickness=1,
-            relief="flat",
-            exportselection=False,
-            font=("Consolas", 10),
-        )
-        scrollbar = tk.Scrollbar(listbox_wrap, orient="vertical", command=self.replicate_listbox.yview)
-        self.replicate_listbox.configure(yscrollcommand=scrollbar.set)
-        self.replicate_listbox.grid(row=0, column=0, sticky="ew")
-        scrollbar.grid(row=0, column=1, sticky="ns")
-
-        btns = tk.Frame(sec1, bg=PANEL)
-        btns.grid(row=7, column=0, columnspan=4, sticky="w")
-        self._make_button(btns, "Select numeric", self.select_numeric_columns, secondary=True).pack(side="left", padx=(0, 8))
-        self._make_button(btns, "Clear selection", self.clear_replicate_selection, secondary=True).pack(side="left")
-
-        sec2 = self._section(
-            parent,
-            "Optional plotting order",
-            "Only use this if the user wants a custom sample order from another table.",
-        )
-        for col in range(4):
-            sec2.grid_columnconfigure(col, weight=1 if col in {0, 1, 2} else 0)
-
-        self._make_label(sec2, "Order file").grid(row=0, column=0, sticky="w")
-        self._make_entry(sec2, self.order_path_var).grid(row=1, column=0, columnspan=2, sticky="ew", padx=(0, 8), pady=(4, 10), ipady=4)
-        self._make_button(sec2, "Browse", self.browse_order, secondary=True).grid(row=1, column=2, sticky="ew", padx=(0, 8), pady=(4, 10))
-        self._make_button(sec2, "Load order columns", self.load_order_columns, secondary=True).grid(row=1, column=3, sticky="ew", pady=(4, 10))
-
-        self._make_label(sec2, "Order column").grid(row=2, column=0, sticky="w")
-        self.order_combo = ttk.Combobox(sec2, textvariable=self.order_column_var, state="readonly", style="Dark.TCombobox")
-        self.order_combo.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(4, 0))
-
-    def _build_controls_tab(self, parent: tk.Widget) -> None:
-        sec1 = self._section(
-            parent,
-            "Threshold-based classification",
-            "Optional. Useful when the user first wants to preview the values and only later decide what is active/inactive.",
-        )
-        for col in range(3):
-            sec1.grid_columnconfigure(col, weight=1)
-
-        tk.Checkbutton(
-            sec1,
-            text="Use threshold to assign Active / Inactive classes",
-            variable=self.use_threshold_var,
-            command=self.update_threshold_state,
-            bg=PANEL,
-            fg=FG,
-            activebackground=PANEL,
-            activeforeground=FG,
-            selectcolor=ENTRY_BG,
-            highlightthickness=0,
-        ).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 10))
-
-        self._make_label(sec1, "Threshold").grid(row=1, column=0, sticky="w")
-        self._make_label(sec1, "Rule").grid(row=1, column=1, sticky="w")
-        tk.Label(sec1, text="ge = Active if value ≥ threshold\nle = Active if value ≤ threshold", bg=PANEL, fg=MUTED, justify="left", anchor="w").grid(row=1, column=2, sticky="w")
-
-        self.threshold_entry = self._make_entry(sec1, self.threshold_var, width=14)
-        self.threshold_entry.grid(row=2, column=0, sticky="ew", padx=(0, 12), pady=(4, 0), ipady=4)
-        self.threshold_mode_combo = ttk.Combobox(
-            sec1,
-            textvariable=self.threshold_mode_var,
-            state="readonly",
-            style="Dark.TCombobox",
-            values=["ge", "le"],
-            width=8,
-        )
-        self.threshold_mode_combo.grid(row=2, column=1, sticky="ew", pady=(4, 0))
-
-        sec2 = self._section(
-            parent,
-            "Control selection",
-            "Controls are used for normalization. The same controls can optionally be excluded from the plot and export table.",
-        )
-        for col in range(2):
-            sec2.grid_columnconfigure(col, weight=1)
-
-        self._make_label(sec2, "Control mode").grid(row=0, column=0, sticky="w")
-        mode_combo = ttk.Combobox(
-            sec2,
-            textvariable=self.control_mode_var,
-            state="readonly",
-            style="Dark.TCombobox",
-            values=["None", "Row numbers", "Sample names", "Column = value", "Query"],
-        )
-        mode_combo.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(4, 10))
-        mode_combo.bind("<<ComboboxSelected>>", lambda event: self.update_control_inputs())
-
-        self.control_label_1 = self._make_label(sec2, "")
-        self.control_label_1.grid(row=2, column=0, columnspan=2, sticky="w")
-        self.control_entry_1 = self._make_entry(sec2, self.control_entry_1_var)
-        self.control_entry_1.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(4, 10), ipady=4)
-
-        self.control_label_2 = self._make_label(sec2, "")
-        self.control_label_2.grid(row=4, column=0, columnspan=2, sticky="w")
-        self.control_entry_2 = self._make_entry(sec2, self.control_entry_2_var)
-        self.control_entry_2.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(4, 10), ipady=4)
-
-        tk.Checkbutton(
-            sec2,
-            text="Exclude control rows from plot and exported table",
-            variable=self.exclude_control_var,
-            bg=PANEL,
-            fg=FG,
-            activebackground=PANEL,
-            activeforeground=FG,
-            selectcolor=ENTRY_BG,
-            highlightthickness=0,
-        ).grid(row=6, column=0, columnspan=2, sticky="w")
-
-        tk.Label(
-            sec2,
-            text="Tip: row numbers are 1-based, exactly as a human reads the spreadsheet.",
-            bg=PANEL,
-            fg=MUTED,
-            anchor="w",
-        ).grid(row=7, column=0, columnspan=2, sticky="w", pady=(10, 0))
-
-        self.update_threshold_state()
-        self.update_control_inputs()
-
-    def _build_plot_tab(self, parent: tk.Widget) -> None:
-        sec1 = self._section(
-            parent,
-            "Plot appearance",
-            "These settings affect preview and export. Leave Y label empty if the automatic label is fine.",
-        )
-        for col in range(4):
-            sec1.grid_columnconfigure(col, weight=1)
-
-        self._make_label(sec1, "Title").grid(row=0, column=0, sticky="w")
-        self._make_entry(sec1, self.title_var).grid(row=1, column=0, columnspan=4, sticky="ew", pady=(4, 10), ipady=4)
-
-        self._make_label(sec1, "Y label").grid(row=2, column=0, sticky="w")
-        self._make_entry(sec1, self.ylabel_var).grid(row=3, column=0, columnspan=4, sticky="ew", pady=(4, 10), ipady=4)
-
-        self._make_label(sec1, "Width").grid(row=4, column=0, sticky="w")
-        self._make_label(sec1, "Height").grid(row=4, column=1, sticky="w")
-        self._make_label(sec1, "Bottom label tilt (°)").grid(row=4, column=2, sticky="w")
-        tk.Label(sec1, text="inches / degrees", bg=PANEL, fg=MUTED, anchor="w").grid(row=4, column=3, sticky="w")
-
-        self._make_entry(sec1, self.figure_width_var, width=10).grid(row=5, column=0, sticky="ew", padx=(0, 10), pady=(4, 0), ipady=4)
-        self._make_entry(sec1, self.figure_height_var, width=10).grid(row=5, column=1, sticky="ew", padx=(0, 10), pady=(4, 0), ipady=4)
-        self._make_entry(sec1, self.rotate_var, width=10).grid(row=5, column=2, sticky="ew", pady=(4, 0), ipady=4)
-
-        sec_style = self._section(
-            parent,
-            "Text style",
-            "Control font family and the sizes of the main text elements in the figure.",
-        )
-        for col in range(4):
-            sec_style.grid_columnconfigure(col, weight=1)
-
-        self._make_label(sec_style, "Font family").grid(row=0, column=0, sticky="w")
-        font_combo = ttk.Combobox(
-            sec_style,
-            textvariable=self.font_family_var,
-            values=["Arial", "DejaVu Sans", "Liberation Sans", "Helvetica", "Calibri", "Times New Roman"],
-            style="Dark.TCombobox",
-        )
-        font_combo.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(4, 10))
-
-        self._make_label(sec_style, "Title size").grid(row=2, column=0, sticky="w")
-        self._make_label(sec_style, "Axis label size").grid(row=2, column=1, sticky="w")
-        self._make_label(sec_style, "Bottom label size").grid(row=2, column=2, sticky="w")
-        self._make_label(sec_style, "Y tick size").grid(row=2, column=3, sticky="w")
-
-        self._make_entry(sec_style, self.title_size_var, width=10).grid(row=3, column=0, sticky="ew", padx=(0, 10), pady=(4, 10), ipady=4)
-        self._make_entry(sec_style, self.axis_label_size_var, width=10).grid(row=3, column=1, sticky="ew", padx=(0, 10), pady=(4, 10), ipady=4)
-        self._make_entry(sec_style, self.xtick_label_size_var, width=10).grid(row=3, column=2, sticky="ew", padx=(0, 10), pady=(4, 10), ipady=4)
-        self._make_entry(sec_style, self.ytick_label_size_var, width=10).grid(row=3, column=3, sticky="ew", pady=(4, 10), ipady=4)
-
-        self._make_label(sec_style, "Legend size").grid(row=4, column=0, sticky="w")
-        self._make_entry(sec_style, self.legend_size_var, width=10).grid(row=5, column=0, sticky="ew", padx=(0, 10), pady=(4, 0), ipady=4)
-        tk.Label(
-            sec_style,
-            text="These settings apply to both preview and exported figures.",
-            bg=PANEL,
-            fg=MUTED,
-            anchor="w",
-        ).grid(row=5, column=1, columnspan=3, sticky="w", pady=(4, 0))
-
-        sec2 = self._section(
-            parent,
-            "Export settings",
-            "Choose where the exported files should go and which formats should be written.",
-        )
-        for col in range(3):
-            sec2.grid_columnconfigure(col, weight=1 if col in {0, 1} else 0)
-
-        self._make_label(sec2, "Output prefix (no extension)").grid(row=0, column=0, sticky="w")
-        self._make_entry(sec2, self.output_prefix_var).grid(row=1, column=0, columnspan=2, sticky="ew", padx=(0, 8), pady=(4, 10), ipady=4)
-        self._make_button(sec2, "Save as…", self.choose_output_prefix, secondary=True).grid(row=1, column=2, sticky="ew", pady=(4, 10))
-
-        tk.Checkbutton(sec2, text="Export table (.csv)", variable=self.export_table_var, bg=PANEL, fg=FG, activebackground=PANEL, activeforeground=FG, selectcolor=ENTRY_BG, highlightthickness=0).grid(row=2, column=0, sticky="w")
-        tk.Checkbutton(sec2, text="Export PNG", variable=self.export_png_var, bg=PANEL, fg=FG, activebackground=PANEL, activeforeground=FG, selectcolor=ENTRY_BG, highlightthickness=0).grid(row=3, column=0, sticky="w")
-        tk.Checkbutton(sec2, text="Export SVG", variable=self.export_svg_var, bg=PANEL, fg=FG, activebackground=PANEL, activeforeground=FG, selectcolor=ENTRY_BG, highlightthickness=0).grid(row=4, column=0, sticky="w")
-
-        note = tk.Label(
-            sec2,
-            text="Preview does not write files. Run + export does.",
-            bg=PANEL,
-            fg=SUCCESS,
-            anchor="w",
-        )
-        note.grid(row=5, column=0, columnspan=3, sticky="w", pady=(10, 0))
-
-    def _make_label(self, parent: tk.Widget, text: str) -> tk.Label:
-        return tk.Label(parent, text=text, bg=PANEL, fg=FG, anchor="w", font=("Segoe UI", 10))
-
-    def _make_entry(self, parent: tk.Widget, textvariable: tk.Variable, width: int = 40) -> tk.Entry:
-        return tk.Entry(
-            parent,
-            textvariable=textvariable,
-            width=width,
-            bg=ENTRY_BG,
-            fg=FG,
-            insertbackground=FG,
-            highlightbackground=BORDER,
-            highlightcolor=BLUE,
-            highlightthickness=1,
-            relief="flat",
-            font=("Consolas", 10),
-        )
-
-    def _make_button(self, parent: tk.Widget, text: str, command, primary: bool = False, secondary: bool = False) -> tk.Button:
-        bg = BLUE if primary else (PANEL_ALT if secondary else BLUE_DARK)
-        active = BLUE_DARK if primary else (BORDER if secondary else BLUE)
-        return tk.Button(
-            parent,
-            text=text,
-            command=command,
-            bg=bg,
-            fg="white",
-            activebackground=active,
-            activeforeground="white",
-            relief="flat",
-            padx=12,
-            pady=8,
-            cursor="hand2",
-            font=("Segoe UI", 10, "bold"),
-            highlightthickness=0,
-            bd=0,
-        )
-
-    def _load_state(self) -> dict:
-        if not self.state_file.exists():
-            return {}
-        try:
-            return json.loads(self.state_file.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
-
-    def _save_state(self) -> None:
-        try:
-            state = {
-                "input_path": self.input_path_var.get().strip(),
-                "order_path": self.order_path_var.get().strip(),
-                "sample_column": self.sample_column_var.get().strip(),
-                "order_column": self.order_column_var.get().strip(),
-                "control_mode": self.control_mode_var.get().strip(),
-                "control_entry_1": self.control_entry_1_var.get().strip(),
-                "control_entry_2": self.control_entry_2_var.get().strip(),
-                "use_threshold": self.use_threshold_var.get(),
-                "threshold": self.threshold_var.get().strip(),
-                "threshold_mode": self.threshold_mode_var.get().strip(),
-                "exclude_control": self.exclude_control_var.get(),
-                "export_table": self.export_table_var.get(),
-                "export_png": self.export_png_var.get(),
-                "export_svg": self.export_svg_var.get(),
-                "output_prefix": self.output_prefix_var.get().strip(),
-                "title": self.title_var.get().strip(),
-                "ylabel": self.ylabel_var.get().strip(),
-                "figure_width": self.figure_width_var.get().strip(),
-                "figure_height": self.figure_height_var.get().strip(),
-                "rotate": self.rotate_var.get().strip(),
-                "font_family": self.font_family_var.get().strip(),
-                "title_size": self.title_size_var.get().strip(),
-                "axis_label_size": self.axis_label_size_var.get().strip(),
-                "xtick_label_size": self.xtick_label_size_var.get().strip(),
-                "ytick_label_size": self.ytick_label_size_var.get().strip(),
-                "legend_size": self.legend_size_var.get().strip(),
-            }
-            self.state_file.write_text(json.dumps(state, indent=2), encoding="utf-8")
+            APP_STATE_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
         except Exception:
             pass
 
-    def _restore_state_defaults(self) -> None:
-        self.update_threshold_state()
-        self.update_control_inputs()
+    def split_csv(text: str | None) -> list[str]:
+        if not text:
+            return []
+        return [x.strip() for x in str(text).split(",") if x.strip()]
 
-    def _dialog_initial_dir(self, current_value: str = "") -> str:
-        text = (current_value or "").strip()
-        if text:
-            path = Path(text).expanduser()
-            if path.exists():
-                return str(path if path.is_dir() else path.parent)
-        return str(self.script_dir)
+    def join_csv(values: list[str] | tuple[str, ...]) -> str:
+        return ", ".join(str(v).strip() for v in values if str(v).strip())
 
-    def _default_output_dir(self) -> Path:
-        output_dir = self.script_dir / "output"
-        output_dir.mkdir(parents=True, exist_ok=True)
-        return output_dir
-
-    def update_status(self, text: str) -> None:
-        self.status_var.set(text)
-        self.root.update_idletasks()
-
-    def update_threshold_state(self) -> None:
-        state = "normal" if self.use_threshold_var.get() else "disabled"
-        self.threshold_entry.configure(state=state)
-        self.threshold_mode_combo.configure(state="readonly" if self.use_threshold_var.get() else "disabled")
-
-    def update_control_inputs(self) -> None:
-        mode = self.control_mode_var.get()
-        configs = {
-            "None": ("", "", False),
-            "Row numbers": ("Control row numbers (comma-separated, 1-based)", "", False),
-            "Sample names": ("Control sample names (comma-separated)", "", False),
-            "Column = value": ("Control column", "Control value", True),
-            "Query": ("Control query / mask", "Example: bioactivity == 2", True),
-        }
-        label1, label2, show_second = configs.get(mode, ("", "", False))
-        self.control_label_1.config(text=label1)
-        self.control_label_2.config(text=label2)
-
-        if show_second:
-            self.control_label_2.grid()
-            self.control_entry_2.grid()
-        else:
-            self.control_label_2.grid_remove()
-            self.control_entry_2.grid_remove()
-
-        if mode == "None":
-            self.exclude_control_var.set(False)
-
-    def browse_input(self) -> None:
-        path = filedialog.askopenfilename(
-            title="Choose input table",
-            initialdir=self._dialog_initial_dir(self.input_path_var.get()),
-            filetypes=[("Tables", "*.csv *.xlsx *.xls"), ("All files", "*.*")],
-        )
-        if path:
-            self.input_path_var.set(path)
-            self._suggest_output_prefix(Path(path))
-            self.load_input_columns(auto_log=False)
-
-    def browse_order(self) -> None:
-        path = filedialog.askopenfilename(
-            title="Choose order table",
-            initialdir=self._dialog_initial_dir(self.order_path_var.get()),
-            filetypes=[("Tables", "*.csv *.xlsx *.xls"), ("All files", "*.*")],
-        )
-        if path:
-            self.order_path_var.set(path)
-            self.load_order_columns(auto_log=False)
-
-    def choose_output_prefix(self) -> None:
-        current_prefix = self.output_prefix_var.get().strip()
-        current_path = Path(current_prefix).expanduser() if current_prefix else self.default_output_prefix
-        path = filedialog.asksaveasfilename(
-            title="Choose output prefix",
-            initialdir=str(current_path.parent if current_path.parent.exists() else self._default_output_dir()),
-            initialfile=current_path.name,
-            defaultextension="",
-            filetypes=[("All files", "*.*")],
-        )
-        if path:
-            output_path = Path(path)
-            if output_path.suffix:
-                output_path = output_path.with_suffix("")
-            self.output_prefix_var.set(str(output_path))
-
-    def _suggest_output_prefix(self, input_path: Path) -> None:
-        current = self.output_prefix_var.get().strip()
-        starter = str(self.default_output_prefix)
-        if current and current != starter:
-            return
-        output_dir = self._default_output_dir()
-        self.output_prefix_var.set(str(output_dir / input_path.stem))
-
-    def load_input_columns(self, auto_log: bool = True) -> None:
-        path_text = self.input_path_var.get().strip()
-        if not path_text:
-            if auto_log:
-                messagebox.showwarning("No input file", "Choose an input file first.")
-            return
-
+    def parse_float(label: str, value: str) -> float:
         try:
-            df = self.core.read_table(Path(path_text))
+            return float(value.strip())
         except Exception as exc:
-            messagebox.showerror("Could not read input file", str(exc))
-            return
+            raise ValueError(f"Invalid number for {label}: {value!r}") from exc
 
-        self.input_df = df
-        self.input_columns = list(df.columns)
-        self.sample_combo["values"] = self.input_columns
-        self.replicate_listbox.delete(0, tk.END)
-        for col in self.input_columns:
-            self.replicate_listbox.insert(tk.END, col)
+    def parse_optional_float(label: str, value: str) -> float | None:
+        text = value.strip()
+        if not text:
+            return None
+        return parse_float(label, text)
 
-        if self.input_columns:
-            self.sample_column_var.set(self._guess_sample_column(self.input_columns, current=self.sample_column_var.get()))
-
-        self.select_numeric_columns()
-        self._suggest_output_prefix(Path(path_text))
-        self._save_state()
-
-        if auto_log:
-            self.log(f"Loaded input columns from: {path_text}")
-        else:
-            self.log(f"Loaded input file: {path_text}")
-
-    def load_order_columns(self, auto_log: bool = True) -> None:
-        path_text = self.order_path_var.get().strip()
-        if not path_text:
-            if auto_log:
-                messagebox.showwarning("No order file", "Choose an order file first.")
-            return
-
-        try:
-            df = self.core.read_table(Path(path_text))
-        except Exception as exc:
-            messagebox.showerror("Could not read order file", str(exc))
-            return
-
-        self.order_columns = list(df.columns)
-        self.order_combo["values"] = self.order_columns
-        if self.order_columns:
-            self.order_column_var.set(self._guess_sample_column(self.order_columns, current=self.order_column_var.get()))
-
-        self._save_state()
-        if auto_log:
-            self.log(f"Loaded order columns from: {path_text}")
-        else:
-            self.log(f"Loaded order file: {path_text}")
-
-    def _guess_sample_column(self, columns: list[str], current: str = "") -> str:
-        if current in columns:
-            return current
-        priorities = ["species", "sample", "name", "plant"]
-        lowered = {col.lower(): col for col in columns}
-        for needle in priorities:
-            for low, original in lowered.items():
-                if needle in low:
-                    return original
-        return columns[0] if columns else ""
-
-    def select_numeric_columns(self) -> None:
-        self.clear_replicate_selection()
-        if not hasattr(self, "input_df"):
-            return
-
-        df = self.input_df
-        candidates = []
-        numeric_cols = set(df.select_dtypes(include="number").columns.tolist())
-        for idx, col in enumerate(self.input_columns):
-            low = col.lower()
-            if col in numeric_cols or any(tag in low for tag in ["rep", "plate", "fluor", "signal", "readout", "avg"]):
-                if col != self.sample_column_var.get():
-                    self.replicate_listbox.selection_set(idx)
-                    candidates.append(col)
-        if candidates:
-            self.log(f"Selected replicate candidates: {', '.join(candidates)}")
-
-    def clear_replicate_selection(self) -> None:
-        if self.replicate_listbox is not None:
-            self.replicate_listbox.selection_clear(0, tk.END)
-
-    def _selected_replicate_columns(self) -> list[str]:
-        indices = self.replicate_listbox.curselection()
-        return [self.replicate_listbox.get(i) for i in indices]
-
-    def _parse_row_numbers(self, text: str) -> list[int]:
+    def parse_row_numbers(text: str) -> list[int]:
         values: list[int] = []
         for part in [p.strip() for p in text.split(",") if p.strip()]:
             if "-" in part:
@@ -866,85 +145,1230 @@ class BioactivityGUI:
                 values.append(int(part))
         return values
 
-    def collect_settings(self) -> dict:
-        input_path = self.input_path_var.get().strip()
-        if not input_path:
-            raise ValueError("Choose an input file.")
+    def open_path(path: str | Path) -> None:
+        p = Path(path).expanduser()
+        if not p.exists():
+            raise FileNotFoundError(f"Path does not exist: {p}")
+        if sys.platform.startswith("win"):
+            os.startfile(str(p))  # type: ignore[attr-defined]
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", str(p)])
+        else:
+            subprocess.Popen(["xdg-open", str(p)])
 
-        sample_column = self.sample_column_var.get().strip()
+    def guess_sample_column(columns: list[str], current: str = "") -> str:
+        if current and current in columns:
+            return current
+        priorities = ["species", "sample", "plant", "name", "extract"]
+        for needle in priorities:
+            for col in columns:
+                if needle in col.lower():
+                    return col
+        return columns[0] if columns else ""
+
+    def table_preview_text(df: pd.DataFrame, n_rows: int = 8) -> str:
+        if df.empty:
+            return "Table loaded, but it contains no rows."
+        preview = df.head(n_rows).copy()
+        with pd.option_context("display.max_columns", 40, "display.width", 180, "display.max_colwidth", 32):
+            return preview.to_string(index=False)
+
+    app_state = load_state()
+
+    root = ctk.CTk()
+    root.title("Plant bioactivity plotter")
+    root.geometry("1360x880")
+    root.minsize(1220, 740)
+    root.configure(fg_color=COLORS["bg"])
+
+    # ---------------------------
+    # Variables and state
+    # ---------------------------
+    parser = build_parser()
+    args = parser.parse_args()
+
+    var_status = tk.StringVar(value="Ready.")
+    var_input_path = tk.StringVar(value=args.input or app_state.get("input_path", ""))
+    var_order_path = tk.StringVar(value=app_state.get("order_path", ""))
+    var_output_prefix = tk.StringVar(value=app_state.get("output_prefix", str(_THIS_DIR / "output" / "plant_bioactivity")))
+
+    var_sample_column = tk.StringVar(value=app_state.get("sample_column", ""))
+    var_replicate_columns = tk.StringVar(value=app_state.get("replicate_columns", ""))
+    var_order_column = tk.StringVar(value=app_state.get("order_column", ""))
+
+    var_control_mode = tk.StringVar(value=app_state.get("control_mode", "None"))
+    var_control_entry_1 = tk.StringVar(value=app_state.get("control_entry_1", ""))
+    var_control_entry_2 = tk.StringVar(value=app_state.get("control_entry_2", ""))
+    var_exclude_control = tk.BooleanVar(value=bool(app_state.get("exclude_control", True)))
+
+    var_use_threshold = tk.BooleanVar(value=bool(app_state.get("use_threshold", False)))
+    var_threshold = tk.StringVar(value=app_state.get("threshold", ""))
+    var_threshold_mode = tk.StringVar(value=app_state.get("threshold_mode", "ge"))
+
+    var_title = tk.StringVar(value=app_state.get("title", "Sample activity"))
+    var_ylabel = tk.StringVar(value=app_state.get("ylabel", ""))
+    var_figure_width = tk.StringVar(value=app_state.get("figure_width", "16"))
+    var_figure_height = tk.StringVar(value=app_state.get("figure_height", "6"))
+    var_rotate = tk.StringVar(value=app_state.get("rotate", "45"))
+    var_font_family = tk.StringVar(value=app_state.get("font_family", "Arial"))
+    var_title_size = tk.StringVar(value=app_state.get("title_size", "16"))
+    var_axis_label_size = tk.StringVar(value=app_state.get("axis_label_size", "20"))
+    var_xtick_label_size = tk.StringVar(value=app_state.get("xtick_label_size", "8"))
+    var_ytick_label_size = tk.StringVar(value=app_state.get("ytick_label_size", "16"))
+    var_legend_size = tk.StringVar(value=app_state.get("legend_size", "12"))
+
+    var_export_table = tk.BooleanVar(value=bool(app_state.get("export_table", True)))
+    var_export_png = tk.BooleanVar(value=bool(app_state.get("export_png", True)))
+    var_export_svg = tk.BooleanVar(value=bool(app_state.get("export_svg", True)))
+
+    var_preview_source = tk.StringVar(value="Input table")
+    var_column_filter = tk.StringVar(value="")
+    var_column_summary = tk.StringVar(value="Load an input table to inspect columns.")
+    var_preview_summary = tk.StringVar(value="No figure generated yet.")
+    var_figure_path_text = tk.StringVar(value="")
+    var_log_badge = tk.StringVar(value="")
+    var_figure_badge = tk.StringVar(value="")
+
+    input_df: pd.DataFrame | None = None
+    order_df: pd.DataFrame | None = None
+    current_preview_df: pd.DataFrame | None = None
+    all_columns: list[str] = []
+    visible_columns: list[str] = []
+    figure_records: list[dict[str, Any]] = []
+    current_canvas: dict[str, Any] = {"canvas": None, "toolbar": None, "figure": None}
+    log_queue: queue.Queue[str] = queue.Queue()
+    active_tab = {"name": "Workflow"}
+    unread_log_events = {"count": 0}
+    unread_figure_events = {"count": 0}
+
+    # ---------------------------
+    # UI helpers
+    # ---------------------------
+    class ToolTip:
+        TOOLTIP_WIDTH = 430
+        SHOW_DELAY_MS = 240
+        HIDE_DELAY_MS = 120
+
+        def __init__(self, widget: Any, text: str) -> None:
+            self.widget = widget
+            self.text = text
+            self.frame: Any = None
+            self._show_after: str | None = None
+            self._hide_after: str | None = None
+            widget.bind("<Enter>", self.schedule_show, add="+")
+            widget.bind("<Leave>", self.schedule_hide, add="+")
+
+        def _cancel_after(self, after_id: str | None) -> None:
+            if after_id:
+                try:
+                    root.after_cancel(after_id)
+                except Exception:
+                    pass
+
+        def schedule_show(self, _event: Any = None) -> None:
+            self._cancel_after(self._hide_after)
+            self._hide_after = None
+            if self.frame is not None or self._show_after is not None:
+                return
+            self._show_after = root.after(self.SHOW_DELAY_MS, self.show)
+
+        def schedule_hide(self, _event: Any = None) -> None:
+            self._cancel_after(self._show_after)
+            self._show_after = None
+            self._cancel_after(self._hide_after)
+            self._hide_after = root.after(self.HIDE_DELAY_MS, self.hide_if_outside)
+
+        def _pointer_inside(self, widget: Any) -> bool:
+            try:
+                x = widget.winfo_pointerx()
+                y = widget.winfo_pointery()
+                left = widget.winfo_rootx()
+                top = widget.winfo_rooty()
+                right = left + widget.winfo_width()
+                bottom = top + widget.winfo_height()
+                return left <= x <= right and top <= y <= bottom
+            except Exception:
+                return False
+
+        def show(self) -> None:
+            self._show_after = None
+            if self.frame is not None:
+                return
+
+            root.update_idletasks()
+            self.frame = ctk.CTkFrame(
+                root,
+                fg_color="#111318",
+                border_color=COLORS["border"],
+                border_width=1,
+                corner_radius=16,
+                width=self.TOOLTIP_WIDTH,
+            )
+            self.frame.pack_propagate(False)
+            label = ctk.CTkLabel(
+                self.frame,
+                text=self.text,
+                font=FONT_SMALL,
+                text_color=COLORS["text"],
+                justify="left",
+                wraplength=self.TOOLTIP_WIDTH - 36,
+                padx=16,
+                pady=12,
+                anchor="w",
+            )
+            label.pack(fill="both", expand=True)
+            self.frame.update_idletasks()
+            height = max(58, label.winfo_reqheight() + 16)
+            self.frame.configure(width=self.TOOLTIP_WIDTH, height=height)
+
+            x = self.widget.winfo_rootx() - root.winfo_rootx() + self.widget.winfo_width() + 10
+            y = self.widget.winfo_rooty() - root.winfo_rooty() + self.widget.winfo_height() + 4
+            x = min(max(12, int(x)), max(12, root.winfo_width() - self.TOOLTIP_WIDTH - 14))
+            y = min(max(12, int(y)), max(12, root.winfo_height() - height - 14))
+            self.frame.place(x=x, y=y)
+            self.frame.lift()
+            self.frame.bind("<Enter>", lambda _event: self._cancel_after(self._hide_after), add="+")
+            self.frame.bind("<Leave>", self.schedule_hide, add="+")
+
+        def hide_if_outside(self) -> None:
+            self._hide_after = None
+            if self._pointer_inside(self.widget) or (self.frame is not None and self._pointer_inside(self.frame)):
+                return
+            self.hide()
+
+        def hide(self, _event: Any = None) -> None:
+            self._cancel_after(self._show_after)
+            self._cancel_after(self._hide_after)
+            self._show_after = None
+            self._hide_after = None
+            if self.frame is not None:
+                try:
+                    self.frame.destroy()
+                except Exception:
+                    pass
+                self.frame = None
+
+    def make_help(parent: Any, text: str) -> Any:
+        bubble = ctk.CTkLabel(
+            parent,
+            text="?",
+            width=23,
+            height=23,
+            corner_radius=12,
+            fg_color=COLORS["card_alt"],
+            text_color=COLORS["muted"],
+            font=("Segoe UI", 11, "bold"),
+        )
+        ToolTip(bubble, text)
+        return bubble
+
+    def make_button(parent: Any, text: str, command: Any, *, primary: bool = False, success: bool = False, danger: bool = False, width: int | None = None) -> Any:
+        color = COLORS["success"] if success else COLORS["danger"] if danger else COLORS["accent"] if primary else COLORS["card_alt"]
+        hover = COLORS["success_hover"] if success else COLORS["danger_hover"] if danger else COLORS["accent_hover"] if primary else "#39414c"
+        return ctk.CTkButton(parent, text=text, command=command, width=width or 112, height=38, corner_radius=10, fg_color=color, hover_color=hover)
+
+    def make_entry(parent: Any, var: tk.StringVar, placeholder: str = "") -> Any:
+        return ctk.CTkEntry(
+            parent,
+            textvariable=var,
+            placeholder_text=placeholder,
+            fg_color=COLORS["entry"],
+            border_color=COLORS["border"],
+            text_color=COLORS["text"],
+            height=36,
+            corner_radius=8,
+        )
+
+    def make_combo(parent: Any, var: tk.StringVar, values: list[str]) -> Any:
+        return ctk.CTkComboBox(
+            parent,
+            variable=var,
+            values=values or [""],
+            fg_color=COLORS["entry"],
+            border_color=COLORS["border"],
+            button_color=COLORS["accent"],
+            button_hover_color=COLORS["accent_hover"],
+            dropdown_fg_color=COLORS["card"],
+            dropdown_hover_color=COLORS["card_alt"],
+            text_color=COLORS["text"],
+            dropdown_text_color=COLORS["text"],
+            height=36,
+            corner_radius=8,
+        )
+
+    def make_checkbox(parent: Any, text: str, variable: tk.BooleanVar, command: Any | None = None) -> Any:
+        return ctk.CTkCheckBox(
+            parent,
+            text=text,
+            variable=variable,
+            command=command,
+            font=FONT_SMALL,
+            text_color=COLORS["text"],
+            fg_color=COLORS["accent"],
+            hover_color=COLORS["accent_hover"],
+            border_color=COLORS["border"],
+            checkbox_width=20,
+            checkbox_height=20,
+        )
+
+    def labeled_widget(parent: Any, label_text: str, widget: Any, row: int, col: int, *, help_text: str = "", colspan: int = 1, padx_right: int = 18) -> None:
+        label_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        label_frame.grid(row=row, column=col, sticky="ew", padx=(0, 10), pady=8)
+        label_frame.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(label_frame, text=label_text, font=FONT_LABEL, text_color=COLORS["muted"], anchor="w").grid(row=0, column=0, sticky="w")
+        if help_text:
+            make_help(label_frame, help_text).grid(row=0, column=1, sticky="e", padx=(6, 0))
+        widget.grid(row=row, column=col + 1, columnspan=colspan, sticky="ew", padx=(0, padx_right), pady=8)
+
+    def make_card(parent: Any, title: str, subtitle: str = "") -> Any:
+        card = ctk.CTkFrame(parent, fg_color=COLORS["card"], border_color=COLORS["border"], border_width=1, corner_radius=16)
+        card.pack(fill="x", padx=6, pady=(0, 12))
+        card.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(card, text=title, font=FONT_CARD_TITLE, text_color=COLORS["text"], anchor="w").grid(row=0, column=0, sticky="ew", padx=18, pady=(16, 2))
+        if subtitle:
+            ctk.CTkLabel(card, text=subtitle, font=FONT_SMALL, text_color=COLORS["muted"], anchor="w", justify="left", wraplength=1040).grid(row=1, column=0, sticky="ew", padx=18, pady=(0, 12))
+        body = ctk.CTkFrame(card, fg_color="transparent")
+        body.grid(row=2, column=0, sticky="ew", padx=18, pady=(0, 18))
+        for col in range(6):
+            body.grid_columnconfigure(col, weight=1 if col % 2 == 1 else 0)
+        return body
+
+    def file_row(parent: Any, row: int, label: str, var: tk.StringVar, browse_cmd: Any, help_text: str, *, load_cmd: Any | None = None) -> None:
+        label_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        label_frame.grid(row=row, column=0, sticky="ew", padx=(0, 10), pady=8)
+        ctk.CTkLabel(label_frame, text=label, font=FONT_LABEL, text_color=COLORS["muted"], anchor="w").pack(side="left")
+        make_help(label_frame, help_text).pack(side="left", padx=(6, 0))
+        make_entry(parent, var).grid(row=row, column=1, columnspan=3 if load_cmd else 4, sticky="ew", padx=(0, 10), pady=8)
+        make_button(parent, "Browse", browse_cmd, width=88).grid(row=row, column=4 if load_cmd else 5, sticky="ew", padx=(0, 10) if load_cmd else 0, pady=8)
+        if load_cmd:
+            make_button(parent, "Load", load_cmd, primary=True, width=78).grid(row=row, column=5, sticky="ew", pady=8)
+
+    def show_toast(message: str, *, kind: str = "info", timeout_ms: int = 3600) -> None:
+        color = COLORS["success"] if kind == "success" else COLORS["danger"] if kind == "error" else COLORS["warning"] if kind == "warning" else COLORS["accent"]
+        toast = ctk.CTkFrame(root, fg_color=color, corner_radius=14)
+        label = ctk.CTkLabel(toast, text=message, font=FONT_SMALL, text_color="white", justify="left", wraplength=420, padx=16, pady=11)
+        label.pack(fill="both", expand=True)
+        root.update_idletasks()
+        toast.place(relx=1.0, rely=0.0, x=-26, y=86, anchor="ne")
+        toast.lift()
+        root.after(timeout_ms, lambda: toast.destroy() if toast.winfo_exists() else None)
+
+    def set_status(text: str) -> None:
+        var_status.set(text)
+        root.update_idletasks()
+
+    def append_log(message: str, *, notify: bool = True) -> None:
+        txt_log.configure(state="normal")
+        txt_log.insert("end", message + "\n")
+        txt_log.see("end")
+        txt_log.configure(state="disabled")
+        if notify and active_tab["name"] != "Log":
+            unread_log_events["count"] += 1
+            update_log_badge()
+
+    def poll_log_queue() -> None:
+        try:
+            while True:
+                append_log(log_queue.get_nowait())
+        except queue.Empty:
+            pass
+        root.after(140, poll_log_queue)
+
+    def current_config_dict() -> dict[str, Any]:
+        """Return only user-editable GUI settings, suitable for app state or a portable config file."""
+        return {
+            "input_path": var_input_path.get().strip(),
+            "order_path": var_order_path.get().strip(),
+            "output_prefix": var_output_prefix.get().strip(),
+            "sample_column": var_sample_column.get().strip(),
+            "replicate_columns": var_replicate_columns.get().strip(),
+            "order_column": var_order_column.get().strip(),
+            "control_mode": var_control_mode.get().strip(),
+            "control_entry_1": var_control_entry_1.get().strip(),
+            "control_entry_2": var_control_entry_2.get().strip(),
+            "exclude_control": bool(var_exclude_control.get()),
+            "use_threshold": bool(var_use_threshold.get()),
+            "threshold": var_threshold.get().strip(),
+            "threshold_mode": var_threshold_mode.get().strip(),
+            "title": var_title.get().strip(),
+            "ylabel": var_ylabel.get().strip(),
+            "figure_width": var_figure_width.get().strip(),
+            "figure_height": var_figure_height.get().strip(),
+            "rotate": var_rotate.get().strip(),
+            "font_family": var_font_family.get().strip(),
+            "title_size": var_title_size.get().strip(),
+            "axis_label_size": var_axis_label_size.get().strip(),
+            "xtick_label_size": var_xtick_label_size.get().strip(),
+            "ytick_label_size": var_ytick_label_size.get().strip(),
+            "legend_size": var_legend_size.get().strip(),
+            "export_table": bool(var_export_table.get()),
+            "export_png": bool(var_export_png.get()),
+            "export_svg": bool(var_export_svg.get()),
+        }
+
+    def save_current_state() -> None:
+        save_state(current_config_dict())
+
+    def apply_config_dict(settings: dict[str, Any]) -> None:
+        """Apply settings from app state or a user-saved JSON config."""
+        var_input_path.set(str(settings.get("input_path", "") or ""))
+        var_order_path.set(str(settings.get("order_path", "") or ""))
+        var_output_prefix.set(str(settings.get("output_prefix", str(_THIS_DIR / "output" / "plant_bioactivity")) or ""))
+        var_sample_column.set(str(settings.get("sample_column", "") or ""))
+        var_replicate_columns.set(str(settings.get("replicate_columns", "") or ""))
+        var_order_column.set(str(settings.get("order_column", "") or ""))
+        var_control_mode.set(str(settings.get("control_mode", "None") or "None"))
+        var_control_entry_1.set(str(settings.get("control_entry_1", "") or ""))
+        var_control_entry_2.set(str(settings.get("control_entry_2", "") or ""))
+        var_exclude_control.set(bool(settings.get("exclude_control", True)))
+        var_use_threshold.set(bool(settings.get("use_threshold", False)))
+        var_threshold.set(str(settings.get("threshold", "") or ""))
+        var_threshold_mode.set(str(settings.get("threshold_mode", "ge") or "ge"))
+        var_title.set(str(settings.get("title", "Sample activity") or "Sample activity"))
+        var_ylabel.set(str(settings.get("ylabel", "") or ""))
+        var_figure_width.set(str(settings.get("figure_width", "16") or "16"))
+        var_figure_height.set(str(settings.get("figure_height", "6") or "6"))
+        var_rotate.set(str(settings.get("rotate", "45") or "45"))
+        var_font_family.set(str(settings.get("font_family", "Arial") or "Arial"))
+        var_title_size.set(str(settings.get("title_size", "16") or "16"))
+        var_axis_label_size.set(str(settings.get("axis_label_size", "20") or "20"))
+        var_xtick_label_size.set(str(settings.get("xtick_label_size", "8") or "8"))
+        var_ytick_label_size.set(str(settings.get("ytick_label_size", "16") or "16"))
+        var_legend_size.set(str(settings.get("legend_size", "12") or "12"))
+        var_export_table.set(bool(settings.get("export_table", True)))
+        var_export_png.set(bool(settings.get("export_png", True)))
+        var_export_svg.set(bool(settings.get("export_svg", True)))
+
+        update_threshold_state()
+        update_control_inputs(preserve_exclude=True)
+        update_column_summary()
+
+    def dialog_initial_dir(current: str = "") -> str:
+        text = current.strip()
+        if text:
+            p = Path(text).expanduser()
+            if p.exists():
+                return str(p if p.is_dir() else p.parent)
+        return str(_THIS_DIR)
+
+    def default_output_dir() -> Path:
+        out = _THIS_DIR / "output"
+        out.mkdir(parents=True, exist_ok=True)
+        return out
+
+    def default_output_prefix(input_path: Path) -> Path:
+        return default_output_dir() / input_path.stem
+
+    # ---------------------------
+    # Layout
+    # ---------------------------
+    root.grid_columnconfigure(0, weight=1)
+    root.grid_rowconfigure(1, weight=1)
+
+    header = ctk.CTkFrame(root, fg_color="transparent")
+    header.grid(row=0, column=0, sticky="ew", padx=24, pady=(20, 12))
+    header.grid_columnconfigure(0, weight=1)
+
+    ctk.CTkLabel(header, text="Plant bioactivity plotter", font=FONT_HEADER, text_color=COLORS["text"], anchor="w").grid(row=0, column=0, sticky="w")
+    ctk.CTkLabel(
+        header,
+        text="Normalize replicate plate-reader data to controls, classify activity, preview the figure, and export publication-ready outputs.",
+        font=FONT_SUBTITLE,
+        text_color=COLORS["muted"],
+        anchor="w",
+    ).grid(row=1, column=0, sticky="w", pady=(4, 0))
+
+    header_actions = ctk.CTkFrame(header, fg_color="transparent")
+    header_actions.grid(row=0, column=1, rowspan=2, sticky="e")
+
+    main_body = ctk.CTkFrame(root, fg_color="transparent")
+    main_body.grid(row=1, column=0, sticky="nsew", padx=24, pady=(0, 12))
+    main_body.grid_columnconfigure(0, weight=1)
+    main_body.grid_rowconfigure(1, weight=1)
+
+    tab_bar_wrap = ctk.CTkFrame(main_body, fg_color="transparent")
+    tab_bar_wrap.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+    tab_bar_wrap.grid_columnconfigure(0, weight=1)
+    tab_bar = ctk.CTkFrame(tab_bar_wrap, fg_color=COLORS["card"], corner_radius=12)
+    tab_bar.grid(row=0, column=0)
+
+    tab_content = ctk.CTkFrame(main_body, fg_color="transparent")
+    tab_content.grid(row=1, column=0, sticky="nsew")
+    tab_content.grid_columnconfigure(0, weight=1)
+    tab_content.grid_rowconfigure(0, weight=1)
+
+    workflow_tab = ctk.CTkFrame(tab_content, fg_color="transparent")
+    preview_tab = ctk.CTkFrame(tab_content, fg_color="transparent")
+    figures_tab = ctk.CTkFrame(tab_content, fg_color="transparent")
+    log_tab = ctk.CTkFrame(tab_content, fg_color="transparent")
+
+    tabs: dict[str, Any] = {
+        "Workflow": workflow_tab,
+        "Preview / column picker": preview_tab,
+        "Figures": figures_tab,
+        "Log": log_tab,
+    }
+    tab_buttons: dict[str, Any] = {}
+
+    def style_tab_button(name: str) -> None:
+        selected = active_tab["name"] == name
+        tab_buttons[name].configure(
+            fg_color=COLORS["accent"] if selected else COLORS["card"],
+            hover_color=COLORS["accent_hover"] if selected else COLORS["card_alt"],
+            text_color=COLORS["text"],
+        )
+
+    def update_log_badge() -> None:
+        count = unread_log_events["count"]
+        if count <= 0:
+            var_log_badge.set("")
+            log_badge.place_forget()
+            return
+        var_log_badge.set(str(count if count < 100 else "99+"))
+        log_badge.place(relx=1.0, rely=0.0, x=-2, y=-3, anchor="ne")
+        log_badge.lift()
+
+    def update_figure_badge() -> None:
+        count = unread_figure_events["count"]
+        if count <= 0:
+            var_figure_badge.set("")
+            figure_badge.place_forget()
+            return
+        var_figure_badge.set(str(count if count < 100 else "99+"))
+        figure_badge.place(relx=1.0, rely=0.0, x=-2, y=-3, anchor="ne")
+        figure_badge.lift()
+
+    def set_active_tab(name: str) -> None:
+        active_tab["name"] = name
+        for tab_name, frame in tabs.items():
+            if tab_name == name:
+                frame.grid(row=0, column=0, sticky="nsew")
+            else:
+                frame.grid_remove()
+            if tab_name in tab_buttons:
+                style_tab_button(tab_name)
+        if name == "Figures":
+            unread_figure_events["count"] = 0
+            update_figure_badge()
+        if name == "Log":
+            unread_log_events["count"] = 0
+            update_log_badge()
+
+    for idx, name in enumerate(tabs):
+        holder = ctk.CTkFrame(tab_bar, fg_color="transparent")
+        holder.grid(row=0, column=idx, padx=4, pady=4)
+        btn = make_button(holder, name, lambda n=name: set_active_tab(n), width=170 if name != "Preview / column picker" else 230)
+        btn.pack()
+        tab_buttons[name] = btn
+        if name == "Figures":
+            figure_badge = ctk.CTkLabel(holder, textvariable=var_figure_badge, width=20, height=20, corner_radius=10, fg_color=COLORS["danger"], text_color="white", font=("Segoe UI", 10, "bold"))
+        if name == "Log":
+            log_badge = ctk.CTkLabel(holder, textvariable=var_log_badge, width=20, height=20, corner_radius=10, fg_color=COLORS["danger"], text_color="white", font=("Segoe UI", 10, "bold"))
+
+    # Header action buttons are wired after functions are defined.
+
+    # ---------------------------
+    # Workflow tab
+    # ---------------------------
+    workflow_tab.grid_columnconfigure(0, weight=1)
+    workflow_tab.grid_rowconfigure(0, weight=1)
+    workflow_scroll = ctk.CTkScrollableFrame(workflow_tab, fg_color="transparent", scrollbar_button_color=COLORS["card_alt"], scrollbar_button_hover_color=COLORS["accent"])
+    workflow_scroll.grid(row=0, column=0, sticky="nsew")
+
+    data_card = make_card(
+        workflow_scroll,
+        "1. Input data and columns",
+        "Load the plate-reader table, choose the sample/species column, and define which columns are biological or technical replicates. The optional order table below is only needed when you want a specific sample order in the final figure.",
+    )
+    file_row(
+        data_card,
+        0,
+        "Input table",
+        var_input_path,
+        lambda: browse_input(),
+        "CSV, TSV, TXT, XLSX or XLS table. Rows should be samples/extracts/plants; replicate fluorescence/readout columns should be numeric.",
+        load_cmd=lambda: load_input_columns(),
+    )
+
+    combo_sample = make_combo(data_card, var_sample_column, [var_sample_column.get() or ""])
+    labeled_widget(
+        data_card,
+        "Sample / species column",
+        combo_sample,
+        1,
+        0,
+        help_text="Column used for x-axis labels. Typical names are Species, Sample, Plant species, sample_name, etc.",
+        colspan=4,
+    )
+
+    entry_reps = make_entry(data_card, var_replicate_columns, "plate_1, plate_2")
+    labeled_widget(
+        data_card,
+        "Replicate columns",
+        entry_reps,
+        2,
+        0,
+        help_text="Comma-separated numeric columns. These are averaged row-by-row before optional normalization to control rows.",
+        colspan=4,
+    )
+
+    rep_buttons = ctk.CTkFrame(data_card, fg_color="transparent")
+    rep_buttons.grid(row=3, column=1, columnspan=5, sticky="ew", padx=(0, 18), pady=(0, 8))
+    make_button(rep_buttons, "Select numeric", lambda: select_numeric_columns_from_input(), width=130).pack(side="left", padx=(0, 8))
+    make_button(rep_buttons, "Open column picker", lambda: set_active_tab("Preview / column picker"), width=160).pack(side="left", padx=(0, 8))
+    make_button(rep_buttons, "Clear replicates", lambda: var_replicate_columns.set(""), width=130).pack(side="left")
+
+    file_row(
+        data_card,
+        4,
+        "Order table",
+        var_order_path,
+        lambda: browse_order(),
+        "Optional. This is a small CSV/Excel file that tells the script how samples should be ordered on the x-axis. Use it when alphabetical/input-table order is not meaningful, for example when you want plants grouped by taxonomy, activity, extract type, or your thesis/publication layout.",
+        load_cmd=lambda: load_order_columns(),
+    )
+    combo_order = make_combo(data_card, var_order_column, [var_order_column.get() or ""])
+    labeled_widget(
+        data_card,
+        "Order column",
+        combo_order,
+        5,
+        0,
+        help_text="Column in the optional order table that contains the same sample/species names as the main input table. Rows in this column define the final x-axis order; samples not present in the order table are removed from the ordered plot.",
+        colspan=4,
+    )
+
+    control_card = make_card(
+        workflow_scroll,
+        "2. Controls and activity threshold",
+        "Controls are used for normalization. The threshold option is only for highlighting samples of interest in the final figure, not for changing the raw measurements.",
+    )
+    make_checkbox(
+        control_card,
+        "Highlight samples using an activity threshold",
+        var_use_threshold,
+        command=lambda: on_threshold_toggle(),
+    ).grid(row=0, column=1, columnspan=3, sticky="w", pady=8)
+    make_help(
+        control_card,
+        "Turn this on when you want the final figure to visually mark samples that pass your activity cutoff. The script adds Active/Inactive labels and colors the bars, so interesting samples stand out immediately. It does not remove any samples or change the measured values.",
+    ).grid(row=0, column=4, sticky="w", pady=8)
+
+    entry_threshold = make_entry(control_card, var_threshold, "80")
+    labeled_widget(
+        control_card,
+        "Threshold",
+        entry_threshold,
+        1,
+        0,
+        help_text="Enter a number in the same units as the plotted y-axis. If controls are selected, the y-axis is Activity (% of control), so values like 80, 100, or 150 mean percent of the control. If no controls are selected, the threshold is applied to the raw mean signal, so enter an absolute fluorescence/readout value.",
+    )
+    combo_threshold_mode = make_combo(control_card, var_threshold_mode, ["ge", "le"])
+    labeled_widget(
+        control_card,
+        "Threshold rule",
+        combo_threshold_mode,
+        1,
+        2,
+        help_text="Choose which side of the cutoff should be highlighted. Use ge when higher values mean stronger activity. Use le when lower values mean stronger inhibition, for example if active samples reduce the fluorescence signal.",
+        colspan=2,
+    )
+
+    combo_control_mode = make_combo(control_card, var_control_mode, ["None", "Row numbers", "Sample names", "Column = value", "Query"])
+    combo_control_mode.configure(command=lambda _value: (update_control_inputs(), on_preview_affecting_setting_changed("Control selection changed.")))
+    labeled_widget(
+        control_card,
+        "Control mode",
+        combo_control_mode,
+        2,
+        0,
+        help_text="Choose how the script should find your control rows. Controls are averaged and used as 100% reference. Row numbers are 1-based like in Excel; sample names must match the sample/species column; Column = value is useful when your table has a column such as sample_type = control.",
+        colspan=4,
+    )
+
+    lbl_control_1 = ctk.CTkLabel(control_card, text="Control values", font=FONT_LABEL, text_color=COLORS["muted"], anchor="w")
+    lbl_control_1.grid(row=3, column=0, sticky="w", padx=(0, 10), pady=8)
+    entry_control_1 = make_entry(control_card, var_control_entry_1)
+    entry_control_1.grid(row=3, column=1, columnspan=5, sticky="ew", padx=(0, 18), pady=8)
+
+    lbl_control_2 = ctk.CTkLabel(control_card, text="Control value", font=FONT_LABEL, text_color=COLORS["muted"], anchor="w")
+    lbl_control_2.grid(row=4, column=0, sticky="w", padx=(0, 10), pady=8)
+    entry_control_2 = make_entry(control_card, var_control_entry_2)
+    entry_control_2.grid(row=4, column=1, columnspan=5, sticky="ew", padx=(0, 18), pady=8)
+
+    make_checkbox(
+        control_card,
+        "Exclude control rows from plot and exported table",
+        var_exclude_control,
+        command=lambda: on_preview_affecting_setting_changed("Control-row exclusion changed."),
+    ).grid(row=5, column=1, columnspan=4, sticky="w", pady=(8, 0))
+    make_help(
+        control_card,
+        "Recommended for final publication figures. Controls are still used to calculate 100% activity, but they are hidden from the final graph and exported CSV. Note: if you use an order table and the controls are not listed in its order column, they will disappear from the ordered plot anyway.",
+    ).grid(row=5, column=4, sticky="w", padx=(8, 0), pady=(8, 0))
+
+    plot_card = make_card(
+        workflow_scroll,
+        "3. Plot appearance and export",
+        "Preview uses the same settings as export. SVG is recommended for publication editing; PNG is useful for quick inspection.",
+    )
+    labeled_widget(plot_card, "Title", make_entry(plot_card, var_title), 0, 0, help_text="Main figure title.", colspan=4)
+    labeled_widget(plot_card, "Y label", make_entry(plot_card, var_ylabel), 1, 0, help_text="Leave empty to use the automatic label: Activity (% of control) or Mean signal.", colspan=4)
+
+    labeled_widget(plot_card, "Width", make_entry(plot_card, var_figure_width), 2, 0, help_text="Figure width in inches.")
+    labeled_widget(plot_card, "Height", make_entry(plot_card, var_figure_height), 2, 2, help_text="Figure height in inches.", colspan=2)
+    labeled_widget(plot_card, "Bottom label tilt", make_entry(plot_card, var_rotate), 3, 0, help_text="X-axis label rotation in degrees. 45 is a good default for many plant names.")
+    combo_font = make_combo(plot_card, var_font_family, ["Arial", "DejaVu Sans", "Liberation Sans", "Helvetica", "Calibri", "Times New Roman"])
+    labeled_widget(plot_card, "Font family", combo_font, 3, 2, help_text="Arial is kept as default for consistency with your other publication figures.", colspan=2)
+
+    labeled_widget(plot_card, "Title size", make_entry(plot_card, var_title_size), 4, 0, help_text="Font size for the plot title.")
+    labeled_widget(plot_card, "Axis label size", make_entry(plot_card, var_axis_label_size), 4, 2, help_text="Font size for x/y axis titles.", colspan=2)
+    labeled_widget(plot_card, "Bottom label size", make_entry(plot_card, var_xtick_label_size), 5, 0, help_text="Font size for plant/sample names on x-axis.")
+    labeled_widget(plot_card, "Y tick size", make_entry(plot_card, var_ytick_label_size), 5, 2, help_text="Font size for y-axis tick labels.", colspan=2)
+    labeled_widget(plot_card, "Legend size", make_entry(plot_card, var_legend_size), 6, 0, help_text="Font size for the optional activity/control legend.")
+
+    file_row(
+        plot_card,
+        7,
+        "Output prefix",
+        var_output_prefix,
+        lambda: choose_output_prefix(),
+        "Path without extension. The GUI will append .csv, .png and/or .svg based on selected export formats.",
+    )
+    exports = ctk.CTkFrame(plot_card, fg_color=COLORS["card_alt"], corner_radius=12)
+    exports.grid(row=8, column=1, columnspan=5, sticky="ew", padx=(0, 18), pady=(10, 4))
+    exports.grid_columnconfigure((0, 1, 2), weight=1)
+    make_checkbox(exports, "Export table (.csv)", var_export_table).grid(row=0, column=0, sticky="w", padx=12, pady=10)
+    make_checkbox(exports, "Export PNG", var_export_png).grid(row=0, column=1, sticky="w", padx=12, pady=10)
+    make_checkbox(exports, "Export SVG", var_export_svg).grid(row=0, column=2, sticky="w", padx=12, pady=10)
+
+    # ---------------------------
+    # Preview / column picker tab
+    # ---------------------------
+    preview_tab.grid_columnconfigure(0, weight=0)
+    preview_tab.grid_columnconfigure(1, weight=1)
+    preview_tab.grid_rowconfigure(0, weight=1)
+
+    picker_panel = ctk.CTkFrame(preview_tab, fg_color=COLORS["card"], border_color=COLORS["border"], border_width=1, corner_radius=16)
+    picker_panel.grid(row=0, column=0, sticky="nsw", padx=(6, 12), pady=10)
+    picker_panel.grid_columnconfigure(0, weight=1)
+    picker_panel.grid_rowconfigure(5, weight=1)
+
+    ctk.CTkLabel(picker_panel, text="Column picker", font=FONT_CARD_TITLE, text_color=COLORS["text"], anchor="w").grid(row=0, column=0, sticky="ew", padx=18, pady=(18, 4))
+    ctk.CTkLabel(
+        picker_panel,
+        text="Inspect headers and send selected columns into the workflow fields. This is safer than typing long column names by hand.",
+        font=FONT_SMALL,
+        text_color=COLORS["muted"],
+        wraplength=325,
+        justify="left",
+        anchor="w",
+    ).grid(row=1, column=0, sticky="ew", padx=18, pady=(0, 14))
+
+    combo_preview_source = make_combo(picker_panel, var_preview_source, ["Input table", "Order table"])
+    combo_preview_source.configure(command=lambda _value: refresh_column_picker())
+    combo_preview_source.grid(row=2, column=0, sticky="ew", padx=18, pady=(0, 8))
+    entry_filter = make_entry(picker_panel, var_column_filter, "Filter columns...")
+    entry_filter.grid(row=3, column=0, sticky="ew", padx=18, pady=(0, 8))
+    var_column_filter.trace_add("write", lambda *_args: refresh_column_picker())
+
+    picker_actions_top = ctk.CTkFrame(picker_panel, fg_color="transparent")
+    picker_actions_top.grid(row=4, column=0, sticky="ew", padx=18, pady=(0, 8))
+    make_button(picker_actions_top, "Load input", lambda: load_input_columns(), width=104).pack(side="left", padx=(0, 8))
+    make_button(picker_actions_top, "Load order", lambda: load_order_columns(), width=104).pack(side="left", padx=(0, 8))
+    make_button(picker_actions_top, "Numeric", lambda: select_numeric_columns_from_input(), width=90).pack(side="left")
+
+    listbox_frame = ctk.CTkFrame(picker_panel, fg_color=COLORS["entry"], border_color=COLORS["border"], border_width=1, corner_radius=10)
+    listbox_frame.grid(row=5, column=0, sticky="nsew", padx=18, pady=(0, 10))
+    listbox_frame.grid_columnconfigure(0, weight=1)
+    listbox_frame.grid_rowconfigure(0, weight=1)
+    column_list = tk.Listbox(
+        listbox_frame,
+        selectmode=tk.EXTENDED,
+        bg=COLORS["entry"],
+        fg=COLORS["text"],
+        selectbackground=COLORS["tile_selected"],
+        selectforeground=COLORS["text"],
+        activestyle="none",
+        highlightthickness=0,
+        relief="flat",
+        font=FONT_MONO,
+        exportselection=False,
+    )
+    column_list.grid(row=0, column=0, sticky="nsew", padx=(12, 0), pady=12)
+    column_y_scroll = tk.Scrollbar(listbox_frame, orient="vertical", command=column_list.yview)
+    column_y_scroll.grid(row=0, column=1, sticky="ns", padx=(0, 12), pady=12)
+    column_x_scroll = tk.Scrollbar(listbox_frame, orient="horizontal", command=column_list.xview)
+    column_x_scroll.grid(row=1, column=0, sticky="ew", padx=(12, 0), pady=(0, 12))
+    column_list.configure(yscrollcommand=column_y_scroll.set, xscrollcommand=column_x_scroll.set)
+
+    picker_actions = ctk.CTkFrame(picker_panel, fg_color="transparent")
+    picker_actions.grid(row=6, column=0, sticky="ew", padx=18, pady=(0, 18))
+    picker_actions.grid_columnconfigure((0, 1), weight=1)
+    make_button(picker_actions, "Set sample column", lambda: apply_selected_columns("sample"), width=150).grid(row=0, column=0, sticky="ew", padx=(0, 8), pady=(0, 8))
+    make_button(picker_actions, "Set order column", lambda: apply_selected_columns("order"), width=150).grid(row=0, column=1, sticky="ew", pady=(0, 8))
+    make_button(picker_actions, "Replace replicates", lambda: apply_selected_columns("rep_replace"), width=150).grid(row=1, column=0, sticky="ew", padx=(0, 8))
+    make_button(picker_actions, "Add to replicates", lambda: apply_selected_columns("rep_add"), width=150).grid(row=1, column=1, sticky="ew")
+
+    preview_right = ctk.CTkFrame(preview_tab, fg_color="transparent")
+    preview_right.grid(row=0, column=1, sticky="nsew", padx=(0, 6), pady=10)
+    preview_right.grid_columnconfigure(0, weight=1)
+    preview_right.grid_rowconfigure(3, weight=1)
+
+    summary_card = ctk.CTkFrame(preview_right, fg_color=COLORS["card"], border_color=COLORS["border"], border_width=1, corner_radius=16)
+    summary_card.grid(row=0, column=0, sticky="ew", pady=(0, 12))
+    summary_card.grid_columnconfigure(0, weight=1)
+    ctk.CTkLabel(summary_card, text="Current selection", font=FONT_CARD_TITLE, text_color=COLORS["text"], anchor="w").grid(row=0, column=0, sticky="ew", padx=18, pady=(16, 4))
+    ctk.CTkLabel(summary_card, textvariable=var_column_summary, font=FONT_SMALL, text_color=COLORS["muted"], anchor="w", justify="left", wraplength=850).grid(row=1, column=0, sticky="ew", padx=18, pady=(0, 16))
+
+    ctk.CTkLabel(preview_right, text="Table preview", font=FONT_CARD_TITLE, text_color=COLORS["text"], anchor="w").grid(row=1, column=0, sticky="ew", pady=(0, 6))
+    ctk.CTkLabel(preview_right, text="Shows the first rows of the selected source table. Use this to verify that the correct file was loaded.", font=FONT_SMALL, text_color=COLORS["muted"], anchor="w").grid(row=2, column=0, sticky="ew", pady=(0, 6))
+    txt_table_preview = ctk.CTkTextbox(preview_right, fg_color=COLORS["card"], border_color=COLORS["border"], border_width=1, text_color=COLORS["text"], font=FONT_MONO, corner_radius=16, wrap="none")
+    txt_table_preview.grid(row=3, column=0, sticky="nsew")
+    txt_table_preview.insert("end", "Load a table to preview rows here.\n")
+    txt_table_preview.configure(state="disabled")
+
+    # ---------------------------
+    # Figures tab
+    # ---------------------------
+    figures_tab.grid_columnconfigure(0, weight=0)
+    figures_tab.grid_columnconfigure(1, weight=1)
+    figures_tab.grid_rowconfigure(0, weight=1)
+
+    figure_side = ctk.CTkFrame(figures_tab, fg_color=COLORS["card"], border_color=COLORS["border"], border_width=1, corner_radius=16)
+    figure_side.grid(row=0, column=0, sticky="nsw", padx=(6, 12), pady=10)
+    figure_side.grid_columnconfigure(0, weight=1)
+    figure_side.grid_rowconfigure(2, weight=1)
+    ctk.CTkLabel(figure_side, text="Generated figures", font=FONT_CARD_TITLE, text_color=COLORS["text"]).grid(row=0, column=0, sticky="w", padx=18, pady=(18, 4))
+    ctk.CTkLabel(
+        figure_side,
+        text="Preview and export runs appear here. Select one to display it again or open saved files.",
+        font=FONT_SMALL,
+        text_color=COLORS["muted"],
+        wraplength=285,
+        justify="left",
+    ).grid(row=1, column=0, sticky="w", padx=18, pady=(0, 14))
+
+    figure_list_box = ctk.CTkFrame(figure_side, fg_color=COLORS["entry"], border_color=COLORS["border"], border_width=1, corner_radius=10)
+    figure_list_box.grid(row=2, column=0, sticky="nsew", padx=18, pady=(0, 12))
+    figure_list_box.grid_columnconfigure(0, weight=1)
+    figure_list_box.grid_rowconfigure(0, weight=1)
+    figure_list = tk.Listbox(
+        figure_list_box,
+        selectmode=tk.BROWSE,
+        bg=COLORS["entry"],
+        fg=COLORS["text"],
+        selectbackground=COLORS["tile_selected"],
+        selectforeground=COLORS["text"],
+        activestyle="none",
+        highlightthickness=0,
+        relief="flat",
+        font=FONT_SMALL,
+        exportselection=False,
+    )
+    figure_list.grid(row=0, column=0, sticky="nsew", padx=(12, 0), pady=12)
+    figure_scroll = tk.Scrollbar(figure_list_box, orient="vertical", command=figure_list.yview)
+    figure_scroll.grid(row=0, column=1, sticky="ns", padx=(0, 12), pady=12)
+    figure_list.configure(yscrollcommand=figure_scroll.set)
+    figure_list.bind("<<ListboxSelect>>", lambda _event: show_selected_figure())
+
+    make_button(figure_side, "Open selected file", lambda: open_selected_figure_file(), width=150).grid(row=3, column=0, sticky="ew", padx=18, pady=(4, 8))
+    make_button(figure_side, "Open output folder", lambda: open_output_folder(), width=150).grid(row=4, column=0, sticky="ew", padx=18, pady=(0, 18))
+
+    figure_preview_panel = ctk.CTkFrame(figures_tab, fg_color=COLORS["card"], border_color=COLORS["border"], border_width=1, corner_radius=16)
+    figure_preview_panel.grid(row=0, column=1, sticky="nsew", padx=(0, 6), pady=10)
+    figure_preview_panel.grid_columnconfigure(0, weight=1)
+    figure_preview_panel.grid_rowconfigure(2, weight=1)
+    ctk.CTkLabel(figure_preview_panel, text="Figure preview", font=FONT_CARD_TITLE, text_color=COLORS["text"], anchor="w").grid(row=0, column=0, sticky="ew", padx=18, pady=(18, 4))
+    ctk.CTkLabel(figure_preview_panel, textvariable=var_preview_summary, font=FONT_SMALL, text_color=COLORS["muted"], anchor="w", justify="left", wraplength=900).grid(row=1, column=0, sticky="ew", padx=18, pady=(0, 8))
+    figure_canvas_host = ctk.CTkFrame(figure_preview_panel, fg_color="#ffffff", corner_radius=10)
+    figure_canvas_host.grid(row=2, column=0, sticky="nsew", padx=18, pady=(0, 10))
+    figure_canvas_host.grid_columnconfigure(0, weight=1)
+    figure_canvas_host.grid_rowconfigure(0, weight=1)
+    figure_placeholder = ctk.CTkLabel(figure_canvas_host, text="No figure generated yet.", text_color="#404040", font=("Segoe UI", 13))
+    figure_placeholder.grid(row=0, column=0, sticky="nsew")
+    ctk.CTkLabel(figure_preview_panel, textvariable=var_figure_path_text, font=FONT_SMALL, text_color=COLORS["muted"], anchor="w", justify="left", wraplength=900).grid(row=3, column=0, sticky="ew", padx=18, pady=(0, 18))
+
+    # ---------------------------
+    # Log tab
+    # ---------------------------
+    log_tab.grid_columnconfigure(0, weight=1)
+    log_tab.grid_rowconfigure(0, weight=1)
+    txt_log = ctk.CTkTextbox(log_tab, fg_color=COLORS["card"], border_color=COLORS["border"], border_width=1, text_color=COLORS["text"], font=FONT_MONO, corner_radius=16, wrap="word")
+    txt_log.grid(row=0, column=0, sticky="nsew", padx=6, pady=10)
+    txt_log.insert("end", "Ready. Load an input table, inspect columns, then preview or export the plant bioactivity figure.\n")
+    txt_log.configure(state="disabled")
+
+    status_bar = ctk.CTkFrame(root, fg_color=COLORS["surface"], corner_radius=0)
+    status_bar.grid(row=2, column=0, sticky="ew")
+    status_bar.grid_columnconfigure(0, weight=1)
+    ctk.CTkLabel(status_bar, textvariable=var_status, font=FONT_SMALL, text_color=COLORS["muted"], anchor="w").grid(row=0, column=0, sticky="ew", padx=18, pady=8)
+
+    # ---------------------------
+    # Logic
+    # ---------------------------
+    def update_column_summary() -> None:
+        rep_cols = split_csv(var_replicate_columns.get())
+        lines = [
+            f"Input columns loaded: {len(input_df.columns) if input_df is not None else 0}",
+            f"Sample column: {var_sample_column.get().strip() or 'not selected'}",
+            f"Replicate columns: {len(rep_cols)}" + (f"  ({join_csv(rep_cols[:6])}{' ...' if len(rep_cols) > 6 else ''})" if rep_cols else ""),
+        ]
+        if order_df is not None:
+            lines.append(f"Order table loaded: {len(order_df)} rows; order column: {var_order_column.get().strip() or 'not selected'}")
+        var_column_summary.set("\n".join(lines))
+
+    def set_table_preview(df: pd.DataFrame | None, source_name: str) -> None:
+        txt_table_preview.configure(state="normal")
+        txt_table_preview.delete("1.0", "end")
+        if df is None:
+            txt_table_preview.insert("end", f"No {source_name.lower()} loaded yet.\n")
+        else:
+            txt_table_preview.insert("end", f"{source_name}: {len(df)} rows × {len(df.columns)} columns\n\n")
+            txt_table_preview.insert("end", table_preview_text(df))
+        txt_table_preview.configure(state="disabled")
+
+    def refresh_column_picker() -> None:
+        nonlocal all_columns, visible_columns, current_preview_df
+        source = var_preview_source.get()
+        current_preview_df = input_df if source == "Input table" else order_df
+        all_columns = list(current_preview_df.columns) if current_preview_df is not None else []
+        query = var_column_filter.get().strip().lower()
+        visible_columns = [c for c in all_columns if not query or query in c.lower()]
+        column_list.delete(0, tk.END)
+        for col in visible_columns:
+            marker = ""
+            if current_preview_df is not None:
+                series = current_preview_df[col]
+                if pd.api.types.is_numeric_dtype(series):
+                    marker = "  [numeric]"
+                else:
+                    numeric_values = pd.to_numeric(series, errors="coerce")
+                    if numeric_values.notna().sum() >= max(1, int(0.5 * len(series))):
+                        marker = "  [numeric-like]"
+            column_list.insert(tk.END, f"{col}{marker}")
+        set_table_preview(current_preview_df, source)
+        update_column_summary()
+
+    def selected_columns_from_picker() -> list[str]:
+        out: list[str] = []
+        for i in column_list.curselection():
+            if 0 <= i < len(visible_columns):
+                out.append(visible_columns[i])
+        return out
+
+    def apply_selected_columns(mode: str) -> None:
+        selected = selected_columns_from_picker()
+        if not selected:
+            show_toast("Select one or more columns first.", kind="warning")
+            return
+        if mode == "sample":
+            var_sample_column.set(selected[0])
+            show_toast(f"Sample column set to: {selected[0]}", kind="success")
+        elif mode == "order":
+            var_order_column.set(selected[0])
+            show_toast(f"Order column set to: {selected[0]}", kind="success")
+        elif mode == "rep_replace":
+            var_replicate_columns.set(join_csv(selected))
+            show_toast(f"Replicate list replaced ({len(selected)} columns).", kind="success")
+        elif mode == "rep_add":
+            existing = split_csv(var_replicate_columns.get())
+            merged = existing + [c for c in selected if c not in existing]
+            var_replicate_columns.set(join_csv(merged))
+            show_toast(f"Added {len([c for c in selected if c not in existing])} replicate column(s).", kind="success")
+        save_current_state()
+        update_column_summary()
+
+    def suggest_output_prefix(path: Path) -> None:
+        current = var_output_prefix.get().strip()
+        default_start = str(_THIS_DIR / "output" / "plant_bioactivity")
+        if not current or current == default_start:
+            var_output_prefix.set(str(default_output_prefix(path)))
+
+    def browse_input() -> None:
+        path = filedialog.askopenfilename(title="Choose input table", initialdir=dialog_initial_dir(var_input_path.get()), filetypes=TABLE_PATTERNS)
+        if path:
+            var_input_path.set(path)
+            suggest_output_prefix(Path(path))
+            load_input_columns(auto_log=False)
+
+    def browse_order() -> None:
+        path = filedialog.askopenfilename(title="Choose order table", initialdir=dialog_initial_dir(var_order_path.get()), filetypes=TABLE_PATTERNS)
+        if path:
+            var_order_path.set(path)
+            load_order_columns(auto_log=False)
+
+    def choose_output_prefix() -> None:
+        current = Path(var_output_prefix.get().strip()).expanduser() if var_output_prefix.get().strip() else (_THIS_DIR / "output" / "plant_bioactivity")
+        path = filedialog.asksaveasfilename(
+            title="Choose output prefix",
+            initialdir=str(current.parent if current.parent.exists() else default_output_dir()),
+            initialfile=current.name,
+            defaultextension="",
+            filetypes=[("All files", "*.*")],
+        )
+        if path:
+            out = Path(path)
+            if out.suffix:
+                out = out.with_suffix("")
+            var_output_prefix.set(str(out))
+            save_current_state()
+
+    def save_config_file() -> None:
+        suggested = f"plant_bioactivity_config_{datetime.now().strftime('%Y%m%d')}.json"
+        path = filedialog.asksaveasfilename(
+            title="Save GUI configuration",
+            initialdir=str(default_output_dir()),
+            initialfile=suggested,
+            defaultextension=".json",
+            filetypes=CONFIG_PATTERNS,
+        )
+        if not path:
+            return
+        payload = {
+            "script": "p_00_plant_bioactivity",
+            "config_version": 1,
+            "saved_at": datetime.now().isoformat(timespec="seconds"),
+            "settings": current_config_dict(),
+        }
+        try:
+            Path(path).write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        except Exception as exc:
+            show_toast("Could not save config.", kind="error")
+            messagebox.showerror("Could not save config", str(exc))
+            return
+        save_current_state()
+        append_log(f"Saved GUI configuration: {path}")
+        show_toast("Configuration saved.", kind="success")
+
+    def load_config_file() -> None:
+        path = filedialog.askopenfilename(
+            title="Load GUI configuration",
+            initialdir=str(default_output_dir()),
+            filetypes=CONFIG_PATTERNS,
+        )
+        if not path:
+            return
+        try:
+            payload = json.loads(Path(path).read_text(encoding="utf-8"))
+            settings = payload.get("settings", payload)
+            if not isinstance(settings, dict):
+                raise ValueError("The selected JSON file does not contain GUI settings.")
+            apply_config_dict(settings)
+            if var_input_path.get().strip() and Path(var_input_path.get().strip()).expanduser().exists():
+                load_input_columns(auto_log=False, auto_select_replicates=False)
+                # Keep values exactly as stored in the config after column menus are refreshed.
+                var_sample_column.set(str(settings.get("sample_column", var_sample_column.get()) or var_sample_column.get()))
+                var_replicate_columns.set(str(settings.get("replicate_columns", var_replicate_columns.get()) or var_replicate_columns.get()))
+            if var_order_path.get().strip() and Path(var_order_path.get().strip()).expanduser().exists():
+                load_order_columns(auto_log=False)
+                var_order_column.set(str(settings.get("order_column", var_order_column.get()) or var_order_column.get()))
+            update_threshold_state()
+            update_control_inputs(preserve_exclude=True)
+            refresh_column_picker()
+            save_current_state()
+        except Exception as exc:
+            show_toast("Could not load config.", kind="error")
+            messagebox.showerror("Could not load config", str(exc))
+            return
+        append_log(f"Loaded GUI configuration: {path}")
+        set_status("Configuration loaded.")
+        show_toast("Configuration loaded.", kind="success")
+
+    def on_preview_affecting_setting_changed(message: str = "Setting changed.") -> None:
+        save_current_state()
+        if figure_records:
+            show_toast(f"{message} Click Preview figure to refresh the graph.", kind="info")
+        else:
+            set_status(message)
+
+    def on_threshold_toggle() -> None:
+        update_threshold_state()
+        on_preview_affecting_setting_changed("Activity-threshold setting changed.")
+
+    def load_input_columns(auto_log: bool = True, auto_select_replicates: bool | None = None) -> None:
+        nonlocal input_df
+        path_text = var_input_path.get().strip()
+        if not path_text:
+            show_toast("Choose an input table first.", kind="warning")
+            return
+        try:
+            df = core.read_table(Path(path_text))
+        except Exception as exc:
+            show_toast("Could not read input table.", kind="error")
+            messagebox.showerror("Could not read input table", str(exc))
+            return
+
+        input_df = df
+        columns = list(df.columns)
+        combo_sample.configure(values=columns or [""])
+        if columns:
+            var_sample_column.set(guess_sample_column(columns, var_sample_column.get()))
+        if auto_select_replicates is None:
+            auto_select_replicates = not bool(var_replicate_columns.get().strip())
+        if auto_select_replicates:
+            select_numeric_columns_from_input(show_message=False)
+        suggest_output_prefix(Path(path_text))
+        var_preview_source.set("Input table")
+        refresh_column_picker()
+        save_current_state()
+        msg = f"Loaded input table: {len(df)} rows × {len(columns)} columns."
+        append_log(msg)
+        if auto_log:
+            show_toast(msg, kind="success")
+        else:
+            show_toast("Input table loaded.", kind="success")
+
+    def load_order_columns(auto_log: bool = True) -> None:
+        nonlocal order_df
+        path_text = var_order_path.get().strip()
+        if not path_text:
+            show_toast("Choose an order table first.", kind="warning")
+            return
+        try:
+            df = core.read_table(Path(path_text))
+        except Exception as exc:
+            show_toast("Could not read order table.", kind="error")
+            messagebox.showerror("Could not read order table", str(exc))
+            return
+        order_df = df
+        columns = list(df.columns)
+        combo_order.configure(values=columns or [""])
+        if columns:
+            var_order_column.set(guess_sample_column(columns, var_order_column.get()))
+        var_preview_source.set("Order table")
+        refresh_column_picker()
+        save_current_state()
+        msg = f"Loaded order table: {len(df)} rows × {len(columns)} columns."
+        append_log(msg)
+        if auto_log:
+            show_toast(msg, kind="success")
+
+    def select_numeric_columns_from_input(show_message: bool = True) -> None:
+        if input_df is None:
+            if show_message:
+                show_toast("Load an input table first.", kind="warning")
+            return
+        sample_col = var_sample_column.get().strip()
+        candidates: list[str] = []
+        for col in input_df.columns:
+            if col == sample_col:
+                continue
+            series = input_df[col]
+            is_candidate = pd.api.types.is_numeric_dtype(series)
+            if not is_candidate:
+                numeric_values = pd.to_numeric(series, errors="coerce")
+                is_candidate = numeric_values.notna().sum() >= max(1, int(0.5 * len(series)))
+            low = col.lower()
+            if is_candidate or any(tag in low for tag in ["rep", "plate", "fluor", "signal", "readout", "avg"]):
+                candidates.append(col)
+        var_replicate_columns.set(join_csv(candidates))
+        update_column_summary()
+        save_current_state()
+        if show_message:
+            show_toast(f"Selected {len(candidates)} numeric/numeric-like replicate column(s).", kind="success")
+            append_log(f"Selected replicate candidates: {join_csv(candidates)}")
+
+    def update_threshold_state() -> None:
+        enabled = var_use_threshold.get()
+        entry_threshold.configure(state="normal" if enabled else "disabled")
+        combo_threshold_mode.configure(state="normal" if enabled else "disabled")
+
+    def update_control_inputs(*, preserve_exclude: bool = False) -> None:
+        mode = var_control_mode.get()
+        if mode == "None":
+            lbl_control_1.configure(text="Control values")
+            entry_control_1.configure(placeholder_text="Controls disabled")
+            entry_control_1.configure(state="disabled")
+            lbl_control_2.grid_remove()
+            entry_control_2.grid_remove()
+            if not preserve_exclude:
+                var_exclude_control.set(False)
+        elif mode == "Row numbers":
+            lbl_control_1.configure(text="Control row numbers")
+            entry_control_1.configure(state="normal", placeholder_text="1, 2 or 1-3,5")
+            lbl_control_2.grid_remove()
+            entry_control_2.grid_remove()
+        elif mode == "Sample names":
+            lbl_control_1.configure(text="Control sample names")
+            entry_control_1.configure(state="normal", placeholder_text="positive_control, solvent_control")
+            lbl_control_2.grid_remove()
+            entry_control_2.grid_remove()
+        elif mode == "Column = value":
+            lbl_control_1.configure(text="Control column")
+            entry_control_1.configure(state="normal", placeholder_text="sample_type")
+            lbl_control_2.configure(text="Control value")
+            lbl_control_2.grid()
+            entry_control_2.grid()
+            entry_control_2.configure(state="normal", placeholder_text="control")
+        elif mode == "Query":
+            lbl_control_1.configure(text="Control query / mask")
+            entry_control_1.configure(state="normal", placeholder_text="sample_type == 'control'")
+            lbl_control_2.grid_remove()
+            entry_control_2.grid_remove()
+
+    def collect_settings() -> dict[str, Any]:
+        input_path = var_input_path.get().strip()
+        if not input_path:
+            raise ValueError("Choose an input table.")
+        sample_column = var_sample_column.get().strip()
         if not sample_column:
             raise ValueError("Choose the sample/species column.")
-
-        replicate_columns = self._selected_replicate_columns()
+        replicate_columns = split_csv(var_replicate_columns.get())
         if not replicate_columns:
             raise ValueError("Choose at least one replicate column.")
 
-        try:
-            figure_size = (float(self.figure_width_var.get()), float(self.figure_height_var.get()))
-        except ValueError as exc:
-            raise ValueError("Figure width and height must be numbers.") from exc
-
-        try:
-            rotate_labels = float(self.rotate_var.get())
-        except ValueError as exc:
-            raise ValueError("Label rotation must be a number.") from exc
-
-        try:
-            title_size = float(self.title_size_var.get())
-            axis_label_size = float(self.axis_label_size_var.get())
-            xtick_label_size = float(self.xtick_label_size_var.get())
-            ytick_label_size = float(self.ytick_label_size_var.get())
-            legend_size = float(self.legend_size_var.get())
-        except ValueError as exc:
-            raise ValueError("Text sizes must be numbers.") from exc
-
-        font_family = self.font_family_var.get().strip() or "Arial"
+        figure_size = (
+            parse_float("figure width", var_figure_width.get()),
+            parse_float("figure height", var_figure_height.get()),
+        )
+        rotate_labels = parse_float("bottom label tilt", var_rotate.get())
+        plot_style = {
+            "font_family": var_font_family.get().strip() or "Arial",
+            "title_size": parse_float("title size", var_title_size.get()),
+            "axis_label_size": parse_float("axis label size", var_axis_label_size.get()),
+            "xtick_label_size": parse_float("bottom label size", var_xtick_label_size.get()),
+            "ytick_label_size": parse_float("Y tick size", var_ytick_label_size.get()),
+            "legend_size": parse_float("legend size", var_legend_size.get()),
+        }
 
         threshold = None
-        if self.use_threshold_var.get():
-            threshold_text = self.threshold_var.get().strip()
-            if not threshold_text:
+        if var_use_threshold.get():
+            threshold = parse_optional_float("threshold", var_threshold.get())
+            if threshold is None:
                 raise ValueError("Threshold is enabled, but no threshold value was entered.")
-            try:
-                threshold = float(threshold_text)
-            except ValueError as exc:
-                raise ValueError("Threshold must be a number.") from exc
 
-        control_mode = self.control_mode_var.get()
+        control_mode = var_control_mode.get()
         control_row_indices = None
         control_sample_names = None
         control_column = None
         control_value = None
         control_query = None
-
         if control_mode == "Row numbers":
-            text = self.control_entry_1_var.get().strip()
+            text = var_control_entry_1.get().strip()
             if not text:
                 raise ValueError("Enter at least one control row number.")
             try:
-                control_row_indices = self._parse_row_numbers(text)
+                control_row_indices = parse_row_numbers(text)
             except ValueError as exc:
                 raise ValueError("Control row numbers must be integers or ranges like 1-3,5.") from exc
         elif control_mode == "Sample names":
-            control_sample_names = [item.strip() for item in self.control_entry_1_var.get().split(",") if item.strip()]
+            control_sample_names = split_csv(var_control_entry_1.get())
             if not control_sample_names:
                 raise ValueError("Enter at least one control sample name.")
         elif control_mode == "Column = value":
-            control_column = self.control_entry_1_var.get().strip()
-            control_value = self.control_entry_2_var.get().strip()
+            control_column = var_control_entry_1.get().strip()
+            control_value = var_control_entry_2.get().strip()
             if not control_column or not control_value:
                 raise ValueError("Fill both control column and control value.")
         elif control_mode == "Query":
-            control_query = self.control_entry_1_var.get().strip()
+            control_query = var_control_entry_1.get().strip()
             if not control_query:
                 raise ValueError("Enter a control query / mask.")
 
-        order_path = self.order_path_var.get().strip() or None
-        order_column = self.order_column_var.get().strip() or None
-        output_prefix = self.output_prefix_var.get().strip() or None
-        title = self.title_var.get().strip() or "Sample activity"
-        ylabel = self.ylabel_var.get().strip() or None
-
+        order_path = var_order_path.get().strip() or None
+        order_column = var_order_column.get().strip() or None
+        output_prefix = var_output_prefix.get().strip() or None
         return {
             "input_path": Path(input_path),
             "sample_column": sample_column,
@@ -952,72 +1376,25 @@ class BioactivityGUI:
             "order_file": Path(order_path) if order_path else None,
             "order_column": order_column,
             "threshold": threshold,
-            "threshold_mode": self.threshold_mode_var.get(),
+            "threshold_mode": var_threshold_mode.get().strip() or "ge",
             "control_row_indices": control_row_indices,
             "control_sample_names": control_sample_names,
             "control_column": control_column,
             "control_value": control_value,
             "control_query": control_query,
-            "exclude_control_from_plot": self.exclude_control_var.get(),
-            "title": title,
-            "ylabel": ylabel,
+            "exclude_control_from_plot": bool(var_exclude_control.get()),
+            "title": var_title.get().strip() or "Sample activity",
+            "ylabel": var_ylabel.get().strip() or None,
             "figure_size": figure_size,
             "rotate_labels": rotate_labels,
-            "plot_style": {
-                "font_family": font_family,
-                "title_size": title_size,
-                "axis_label_size": axis_label_size,
-                "xtick_label_size": xtick_label_size,
-                "ytick_label_size": ytick_label_size,
-                "legend_size": legend_size,
-            },
+            "plot_style": plot_style,
             "output_prefix": Path(output_prefix) if output_prefix else None,
-            "export_table": self.export_table_var.get(),
-            "export_png": self.export_png_var.get(),
-            "export_svg": self.export_svg_var.get(),
+            "export_table": bool(var_export_table.get()),
+            "export_png": bool(var_export_png.get()),
+            "export_svg": bool(var_export_svg.get()),
         }
 
-    def log(self, message: str) -> None:
-        self.log_text.insert("end", message + "\n")
-        self.log_text.see("end")
-        self.root.update_idletasks()
-
-    def clear_log(self) -> None:
-        self.log_text.delete("1.0", "end")
-        self.log("Log cleared.")
-
-    def show_figure(self, fig) -> None:
-        if self.preview_hint and self.preview_hint.winfo_exists():
-            self.preview_hint.pack_forget()
-
-        if self.canvas_widget is not None:
-            self.canvas_widget.get_tk_widget().destroy()
-            self.canvas_widget = None
-        if self.toolbar is not None:
-            self.toolbar.destroy()
-            self.toolbar = None
-        if self.current_figure is not None:
-            plt.close(self.current_figure)
-
-        self.current_figure = fig
-        canvas = FigureCanvasTkAgg(fig, master=self.preview_frame)
-        canvas.draw()
-        canvas.get_tk_widget().pack(fill="both", expand=True)
-
-        toolbar = NavigationToolbar2Tk(canvas, self.preview_frame, pack_toolbar=False)
-        toolbar.update()
-        toolbar.pack(fill="x")
-
-        self.canvas_widget = canvas
-        self.toolbar = toolbar
-
-    def _default_output_prefix(self, input_path: Path) -> Path:
-        if self.output_prefix_var.get().strip():
-            return Path(self.output_prefix_var.get().strip())
-        output_dir = self._default_output_dir()
-        return output_dir / input_path.stem
-
-    def _set_preview_summary(self, processed_df, value_column: str, control_mean: float | None) -> None:
+    def set_preview_summary(processed_df: pd.DataFrame, value_column: str, control_mean: float | None, saved_paths: list[Path] | None = None) -> None:
         lines = [
             f"Rows plotted: {len(processed_df)}",
             f"Value column: {value_column}",
@@ -1027,167 +1404,260 @@ class BioactivityGUI:
         if "activity_class" in processed_df.columns:
             counts = processed_df["activity_class"].value_counts().to_dict()
             lines.append(f"Classes: {counts}")
-        self.preview_summary_var.set("\n".join(lines))
+        if saved_paths:
+            lines.append("Saved: " + "; ".join(str(p) for p in saved_paths))
+        var_preview_summary.set("\n".join(lines))
 
-    def preview_figure(self) -> None:
+    def clear_figure_canvas() -> None:
+        if current_canvas["canvas"] is not None:
+            try:
+                current_canvas["canvas"].get_tk_widget().destroy()
+            except Exception:
+                pass
+            current_canvas["canvas"] = None
+        if current_canvas["toolbar"] is not None:
+            try:
+                current_canvas["toolbar"].destroy()
+            except Exception:
+                pass
+            current_canvas["toolbar"] = None
+
+    def display_figure(fig: Any) -> None:
+        figure_placeholder.grid_remove()
+        clear_figure_canvas()
+        current_canvas["figure"] = fig
+        canvas = FigureCanvasTkAgg(fig, master=figure_canvas_host)
+        canvas.draw()
+        canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
+        toolbar = NavigationToolbar2Tk(canvas, figure_canvas_host, pack_toolbar=False)
+        toolbar.update()
+        toolbar.grid(row=1, column=0, sticky="ew")
+        current_canvas["canvas"] = canvas
+        current_canvas["toolbar"] = toolbar
+
+    def add_figure_record(fig: Any, label: str, saved_paths: list[Path] | None = None) -> None:
+        figure_records.append({"label": label, "figure": fig, "saved_paths": saved_paths or []})
+        figure_list.insert(tk.END, label)
+        figure_list.selection_clear(0, tk.END)
+        figure_list.selection_set(tk.END)
+        figure_list.see(tk.END)
+        if active_tab["name"] != "Figures":
+            unread_figure_events["count"] += 1
+            update_figure_badge()
+        show_selected_figure()
+
+    def show_selected_figure() -> None:
+        sel = figure_list.curselection()
+        if not sel:
+            return
+        idx = sel[0]
+        if idx < 0 or idx >= len(figure_records):
+            return
+        record = figure_records[idx]
+        display_figure(record["figure"])
+        saved = record.get("saved_paths") or []
+        var_figure_path_text.set("\n".join(str(p) for p in saved) if saved else "Preview figure only; no files saved for this record.")
+
+    def run_core_pipeline(settings: dict[str, Any]) -> tuple[pd.DataFrame, Any, str, float | None]:
+        return core.run_pipeline(
+            input_path=settings["input_path"],
+            sample_column=settings["sample_column"],
+            replicate_columns=settings["replicate_columns"],
+            order_file=settings["order_file"],
+            order_column=settings["order_column"],
+            threshold=settings["threshold"],
+            threshold_mode=settings["threshold_mode"],
+            control_row_indices=settings["control_row_indices"],
+            control_sample_names=settings["control_sample_names"],
+            control_column=settings["control_column"],
+            control_value=settings["control_value"],
+            control_query=settings["control_query"],
+            exclude_control_from_plot=settings["exclude_control_from_plot"],
+            title=settings["title"],
+            ylabel=settings["ylabel"],
+            figure_size=settings["figure_size"],
+            rotate_labels=settings["rotate_labels"],
+            plot_style=settings["plot_style"],
+        )
+
+    def preview_figure() -> None:
         try:
-            settings = self.collect_settings()
-            self._save_state()
-            self.update_status("Previewing figure...")
-            self.log("Previewing figure...")
-
-            processed_df, fig, value_column, control_mean = self.core.run_pipeline(
-                input_path=settings["input_path"],
-                sample_column=settings["sample_column"],
-                replicate_columns=settings["replicate_columns"],
-                order_file=settings["order_file"],
-                order_column=settings["order_column"],
-                threshold=settings["threshold"],
-                threshold_mode=settings["threshold_mode"],
-                control_row_indices=settings["control_row_indices"],
-                control_sample_names=settings["control_sample_names"],
-                control_column=settings["control_column"],
-                control_value=settings["control_value"],
-                control_query=settings["control_query"],
-                exclude_control_from_plot=settings["exclude_control_from_plot"],
-                title=settings["title"],
-                ylabel=settings["ylabel"],
-                figure_size=settings["figure_size"],
-                rotate_labels=settings["rotate_labels"],
-                plot_style=settings["plot_style"],
-            )
-            self.show_figure(fig)
-            self._set_preview_summary(processed_df, value_column, control_mean)
-            self.log(f"Rows plotted: {len(processed_df)}")
-            self.log(f"Value column used: {value_column}")
-            if control_mean is not None:
-                self.log(f"Control mean: {control_mean:.4f}")
-            self.update_status("Preview ready.")
+            settings = collect_settings()
+            save_current_state()
+            set_status("Previewing figure...")
+            append_log("Previewing figure...", notify=False)
+            processed_df, fig, value_column, control_mean = run_core_pipeline(settings)
+            set_preview_summary(processed_df, value_column, control_mean)
+            add_figure_record(fig, f"Preview {datetime.now().strftime('%H:%M:%S')}")
+            append_log(f"Preview ready: {len(processed_df)} rows plotted; value column = {value_column}.")
+            set_status("Preview ready.")
+            set_active_tab("Figures")
+            show_toast("Preview ready.", kind="success")
         except Exception as exc:
-            self.update_status("Preview failed.")
+            set_status("Preview failed.")
+            append_log("ERROR during preview:\n" + traceback.format_exc())
+            show_toast("Preview failed.", kind="error")
             messagebox.showerror("Preview failed", str(exc))
-            self.log(f"ERROR: {exc}")
 
-    def run_and_export(self) -> None:
+    def run_and_export() -> None:
         try:
-            settings = self.collect_settings()
+            settings = collect_settings()
             if not any([settings["export_table"], settings["export_png"], settings["export_svg"]]):
                 raise ValueError("Choose at least one export format.")
-
-            self._save_state()
-            self.update_status("Running analysis and exporting files...")
-            self.log("Running analysis and exporting files...")
-
-            processed_df, fig, value_column, control_mean = self.core.run_pipeline(
-                input_path=settings["input_path"],
-                sample_column=settings["sample_column"],
-                replicate_columns=settings["replicate_columns"],
-                order_file=settings["order_file"],
-                order_column=settings["order_column"],
-                threshold=settings["threshold"],
-                threshold_mode=settings["threshold_mode"],
-                control_row_indices=settings["control_row_indices"],
-                control_sample_names=settings["control_sample_names"],
-                control_column=settings["control_column"],
-                control_value=settings["control_value"],
-                control_query=settings["control_query"],
-                exclude_control_from_plot=settings["exclude_control_from_plot"],
-                title=settings["title"],
-                ylabel=settings["ylabel"],
-                figure_size=settings["figure_size"],
-                rotate_labels=settings["rotate_labels"],
-                plot_style=settings["plot_style"],
-            )
-            self.show_figure(fig)
-            self._set_preview_summary(processed_df, value_column, control_mean)
-
-            output_prefix = settings["output_prefix"] or self._default_output_prefix(settings["input_path"])
-            saved_paths = self.core.save_outputs(
-                fig=fig,
-                df=processed_df,
-                output_prefix=output_prefix,
-                export_table=settings["export_table"],
-                export_png=settings["export_png"],
-                export_svg=settings["export_svg"],
-            )
-
-            for path in saved_paths:
-                self.log(f"Saved: {path}")
-
-            self.update_status("Export finished.")
-            messagebox.showinfo("Done", "Export finished successfully.")
+            save_current_state()
         except Exception as exc:
-            self.update_status("Export failed.")
-            messagebox.showerror("Run failed", str(exc))
-            self.log(f"ERROR: {exc}")
+            show_toast("Settings are incomplete.", kind="error")
+            messagebox.showerror("Settings problem", str(exc))
+            return
 
-    def reset_form(self) -> None:
+        def worker() -> None:
+            try:
+                log_queue.put("Running analysis and exporting files...")
+                processed_df, fig, value_column, control_mean = run_core_pipeline(settings)
+                output_prefix = settings["output_prefix"] or default_output_prefix(settings["input_path"])
+                saved_paths = core.save_outputs(
+                    fig=fig,
+                    df=processed_df,
+                    output_prefix=output_prefix,
+                    export_table=settings["export_table"],
+                    export_png=settings["export_png"],
+                    export_svg=settings["export_svg"],
+                )
+                root.after(0, lambda: finish_export_success(processed_df, fig, value_column, control_mean, saved_paths))
+            except Exception as exc:
+                root.after(0, lambda e=exc: finish_export_error(e))
+
+        set_status("Running analysis and exporting files...")
+        make_button_preview.configure(state="disabled")
+        make_button_run.configure(state="disabled")
+        threading.Thread(target=worker, daemon=True).start()
+
+    def finish_export_success(processed_df: pd.DataFrame, fig: Any, value_column: str, control_mean: float | None, saved_paths: list[Path]) -> None:
+        make_button_preview.configure(state="normal")
+        make_button_run.configure(state="normal")
+        for path in saved_paths:
+            append_log(f"Saved: {path}")
+        set_preview_summary(processed_df, value_column, control_mean, saved_paths)
+        add_figure_record(fig, f"Export {datetime.now().strftime('%H:%M:%S')}", saved_paths)
+        set_status("Export finished.")
+        set_active_tab("Figures")
+        show_toast("Export finished successfully.", kind="success")
+
+    def finish_export_error(exc: Exception) -> None:
+        make_button_preview.configure(state="normal")
+        make_button_run.configure(state="normal")
+        set_status("Export failed.")
+        append_log("ERROR during export:\n" + "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
+        show_toast("Export failed.", kind="error")
+        messagebox.showerror("Run failed", str(exc))
+
+    def open_selected_figure_file() -> None:
+        sel = figure_list.curselection()
+        if not sel:
+            show_toast("Select a generated figure first.", kind="warning")
+            return
+        paths = figure_records[sel[0]].get("saved_paths") or []
+        if not paths:
+            show_toast("This preview was not exported to a file.", kind="warning")
+            return
+        # Prefer SVG for publication editing, otherwise use first saved path.
+        chosen = next((p for p in paths if Path(p).suffix.lower() == ".svg"), paths[0])
+        try:
+            open_path(chosen)
+        except Exception as exc:
+            messagebox.showerror("Could not open file", str(exc))
+
+    def open_output_folder() -> None:
+        path_text = var_output_prefix.get().strip()
+        if not path_text:
+            show_toast("No output prefix set.", kind="warning")
+            return
+        folder = Path(path_text).expanduser().parent
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            open_path(folder)
+        except Exception as exc:
+            messagebox.showerror("Could not open folder", str(exc))
+
+    def reset_form() -> None:
         if not messagebox.askyesno("Reset form", "Clear the current GUI settings?"):
             return
-        self.input_path_var.set("")
-        self.order_path_var.set("")
-        self.sample_column_var.set("")
-        self.order_column_var.set("")
-        self.control_mode_var.set("None")
-        self.control_entry_1_var.set("")
-        self.control_entry_2_var.set("")
-        self.use_threshold_var.set(False)
-        self.threshold_var.set("")
-        self.threshold_mode_var.set("ge")
-        self.exclude_control_var.set(True)
-        self.export_table_var.set(True)
-        self.export_png_var.set(True)
-        self.export_svg_var.set(True)
-        self.output_prefix_var.set(str(self.default_output_prefix))
-        self.title_var.set("Sample activity")
-        self.ylabel_var.set("")
-        self.figure_width_var.set("16")
-        self.figure_height_var.set("6")
-        self.rotate_var.set("45")
-        self.font_family_var.set("Arial")
-        self.title_size_var.set("16")
-        self.axis_label_size_var.set("20")
-        self.xtick_label_size_var.set("8")
-        self.ytick_label_size_var.set("16")
-        self.legend_size_var.set("12")
-        self.input_columns = []
-        self.order_columns = []
-        self.sample_combo["values"] = []
-        self.order_combo["values"] = []
-        self.clear_replicate_selection()
-        self.replicate_listbox.delete(0, tk.END)
-        self.update_threshold_state()
-        self.update_control_inputs()
-        self.preview_summary_var.set("Load a table, choose columns, and preview the figure here.")
-        self.clear_log()
-        self._save_state()
-        self.update_status("Form reset.")
+        nonlocal input_df, order_df
+        input_df = None
+        order_df = None
+        var_input_path.set("")
+        var_order_path.set("")
+        var_output_prefix.set(str(_THIS_DIR / "output" / "plant_bioactivity"))
+        var_sample_column.set("")
+        var_replicate_columns.set("")
+        var_order_column.set("")
+        var_control_mode.set("None")
+        var_control_entry_1.set("")
+        var_control_entry_2.set("")
+        var_exclude_control.set(False)
+        var_use_threshold.set(False)
+        var_threshold.set("")
+        var_threshold_mode.set("ge")
+        var_title.set("Sample activity")
+        var_ylabel.set("")
+        var_figure_width.set("16")
+        var_figure_height.set("6")
+        var_rotate.set("45")
+        var_font_family.set("Arial")
+        var_title_size.set("16")
+        var_axis_label_size.set("20")
+        var_xtick_label_size.set("8")
+        var_ytick_label_size.set("16")
+        var_legend_size.set("12")
+        var_export_table.set(True)
+        var_export_png.set(True)
+        var_export_svg.set(True)
+        combo_sample.configure(values=[""])
+        combo_order.configure(values=[""])
+        update_threshold_state()
+        update_control_inputs()
+        refresh_column_picker()
+        save_current_state()
+        set_status("Form reset.")
+        show_toast("Form reset.", kind="success")
+
+    # Header action buttons now that callbacks exist.
+    make_button_preview = make_button(header_actions, "Preview figure", preview_figure, width=135)
+    make_button_preview.pack(side="left", padx=(0, 8))
+    make_button_run = make_button(header_actions, "Run + export", run_and_export, primary=True, width=135)
+    make_button_run.pack(side="left", padx=(0, 8))
+    make_button(header_actions, "Load columns", load_input_columns, width=120).pack(side="left", padx=(0, 8))
+    make_button(header_actions, "Save config", save_config_file, width=116).pack(side="left", padx=(0, 8))
+    make_button(header_actions, "Load config", load_config_file, width=116).pack(side="left", padx=(0, 8))
+    make_button(header_actions, "Reset", reset_form, width=86).pack(side="left", padx=(0, 8))
+    make_button(header_actions, "Close", root.destroy, danger=True, width=78).pack(side="left")
+
+    # Initial state.
+    update_threshold_state()
+    update_control_inputs()
+    set_active_tab("Workflow")
+    poll_log_queue()
+    update_column_summary()
+    if var_input_path.get().strip():
+        load_input_columns(auto_log=False)
+
+    try:
+        root.mainloop()
+    finally:
+        save_current_state()
+        # Do not force-close figures while Tk is using one; close remaining at shutdown.
+        try:
+            plt.close("all")
+        except Exception:
+            pass
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Launch the GUI for plant bioactivity plotting.")
-    parser.add_argument("--input", help="Optional input CSV/XLSX file to pre-load.")
+    parser = argparse.ArgumentParser(description="Launch the CustomTkinter GUI for plant bioactivity plotting.")
+    parser.add_argument("--input", help="Optional input CSV/TSV/TXT/XLSX file to pre-load.")
     return parser
 
 
-def main() -> None:
-    args = build_parser().parse_args()
-    script_dir = Path(__file__).resolve().parent
-    core_path = script_dir / "p_00_00_plant_bioactivity_core.py"
-
-    if not core_path.exists():
-        raise FileNotFoundError(
-            "Could not find p_00_00_plant_bioactivity_core.py in the same folder as the GUI script."
-        )
-
-    core_module = load_core_module(core_path)
-    root = tk.Tk()
-    app = BioactivityGUI(root, core_module, initial_input=args.input)
-    try:
-        root.mainloop()
-    except KeyboardInterrupt:
-        pass
-
-
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

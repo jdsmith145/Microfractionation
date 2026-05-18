@@ -31,6 +31,7 @@ python p_00_00_plant_bioactivity_core.py \
 from __future__ import annotations
 
 import argparse
+import logging
 from pathlib import Path
 from typing import Iterable, Sequence
 
@@ -39,6 +40,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from matplotlib.patches import Patch
+
+LOGGER = logging.getLogger("plant_bioactivity_core")
 
 mpl.rcParams["font.family"] = "Arial"
 mpl.rcParams["svg.fonttype"] = "none"
@@ -65,13 +68,24 @@ class BioactivityError(Exception):
     """Raised for user-facing data/configuration errors."""
 
 
-def read_table(path: Path) -> pd.DataFrame:
+def read_table(path: Path | str) -> pd.DataFrame:
+    """Read a CSV/TSV/TXT/Excel table.
+
+    Script 0 historically accepted CSV and Excel files. TSV/TXT support is added
+    here because users often export plate-reader data as tab-delimited text.
+    """
+    path = Path(path).expanduser()
+    if not path.exists():
+        raise BioactivityError(f"Input table not found: {path}")
+
     suffix = path.suffix.lower()
     if suffix == ".csv":
         return pd.read_csv(path)
+    if suffix in {".tsv", ".txt"}:
+        return pd.read_csv(path, sep="\t")
     if suffix in {".xlsx", ".xls"}:
         return pd.read_excel(path)
-    raise BioactivityError(f"Unsupported file type: {path.suffix}. Use CSV or Excel.")
+    raise BioactivityError(f"Unsupported file type: {path.suffix}. Use CSV, TSV, TXT, XLSX, or XLS.")
 
 
 def clean_text_column(series: pd.Series) -> pd.Series:
@@ -343,6 +357,9 @@ def process_bioactivity_table(
     exclude_control_from_plot: bool = False,
 ) -> tuple[pd.DataFrame, str, float | None]:
     df = read_table(input_path).copy()
+    replicate_columns = list(dict.fromkeys(replicate_columns))
+    if not replicate_columns:
+        raise BioactivityError("At least one replicate column is required.")
     ensure_columns(df, [sample_column, *replicate_columns])
 
     df[sample_column] = clean_text_column(df[sample_column])
@@ -363,7 +380,9 @@ def process_bioactivity_table(
 
     control_mean = compute_control_mean(df, "mean_signal", control_mask)
     if control_mean is not None:
-        df["relative_to_control_pct"] = (control_mean / df["mean_signal"]) * 100
+        with np.errstate(divide="ignore", invalid="ignore"):
+            df["relative_to_control_pct"] = (control_mean / df["mean_signal"]) * 100
+        df["relative_to_control_pct"] = df["relative_to_control_pct"].replace([np.inf, -np.inf], np.nan)
         value_column = "relative_to_control_pct"
     else:
         value_column = "mean_signal"
@@ -400,6 +419,9 @@ def save_outputs(
     output_prefix.parent.mkdir(parents=True, exist_ok=True)
     saved_paths: list[Path] = []
 
+    if not any([export_table, export_png, export_svg]):
+        raise BioactivityError("Choose at least one export format.")
+
     if export_svg:
         path = output_prefix.with_suffix(".svg")
         fig.savefig(path, dpi=300, format="svg")
@@ -413,6 +435,7 @@ def save_outputs(
         df.to_csv(path, index=False)
         saved_paths.append(path)
 
+    LOGGER.info("Saved %s output file(s).", len(saved_paths))
     return saved_paths
 
 
@@ -436,6 +459,7 @@ def run_pipeline(
     rotate_labels: float = 45,
     plot_style: dict | None = None,
 ) -> tuple[pd.DataFrame, plt.Figure, str, float | None]:
+    LOGGER.info("Running plant bioactivity pipeline for %s.", input_path)
     processed_df, value_column, control_mean = process_bioactivity_table(
         input_path=input_path,
         sample_column=sample_column,
@@ -552,12 +576,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--export-table", action="store_true", help="Export the processed table as CSV.")
     parser.add_argument("--export-png", action="store_true", help="Export the plot as PNG.")
     parser.add_argument("--export-svg", action="store_true", help="Export the plot as SVG.")
+    parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"], help="Console logging level.")
     return parser
 
 
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
+    logging.basicConfig(level=getattr(logging, args.log_level), format="%(levelname)s: %(message)s")
 
     script_dir = Path(__file__).resolve().parent
     input_path = resolve_path(args.input, script_dir)
