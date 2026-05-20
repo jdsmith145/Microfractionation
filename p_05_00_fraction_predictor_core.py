@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 
 
-LOGGER = logging.getLogger("fraction_core")
+LOGGER = logging.getLogger("fraction_predictor_core")
 
 
 # ---------------------------
@@ -46,6 +46,11 @@ def read_table(path: str | Path, **kwargs: Any) -> pd.DataFrame:
     if suffix in {".xlsx", ".xls"}:
         return pd.read_excel(path, **kwargs)
     raise ValueError(f"Unsupported file type for {path}. Use CSV or Excel.")
+
+
+def read_table_columns(path: str | Path, **kwargs: Any) -> list[str]:
+    """Return column names from a supported table."""
+    return [str(col) for col in read_table(path, **kwargs).columns]
 
 
 def write_table(df: pd.DataFrame, path: str | Path) -> Path:
@@ -569,6 +574,423 @@ def append_columns_by_id(
     return merged.drop(columns=["__merge_id__"])
 
 
+def _clean_bioactivity_group(value: Any) -> str:
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return "No data"
+    text = str(value).strip()
+    if not text:
+        return "No data"
+    if text.startswith("group_below_"):
+        return f"below {text.removeprefix('group_below_')}"
+    if text.startswith("group_above_"):
+        return f"above {text.removeprefix('group_above_')}"
+    if text.startswith("group_") and "_to_" in text:
+        body = text.removeprefix("group_").replace("_to_", " to ")
+        return body
+    return text.replace("_", " ")
+
+
+def _format_float(value: Any, digits: int = 2) -> str:
+    number = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+    if pd.isna(number):
+        return ""
+    return f"{float(number):.{digits}f}"
+
+
+def _join_human_list(values: list[str]) -> str:
+    cleaned = [str(value).strip() for value in values if str(value).strip()]
+    if not cleaned:
+        return ""
+    if len(cleaned) == 1:
+        return cleaned[0]
+    return f"{', '.join(cleaned[:-1])} and {cleaned[-1]}"
+
+
+def _coerce_bool(value: Any) -> Optional[bool]:
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return None
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"true", "1", "yes", "present"}:
+        return True
+    if text in {"false", "0", "no", "absent"}:
+        return False
+    return None
+
+
+def _plant_result_columns(plants_cfg: list[dict[str, Any]]) -> list[dict[str, str]]:
+    columns = []
+    for plant_cfg in plants_cfg:
+        name = str(plant_cfg["name"])
+        slug = slugify(name)
+        columns.append(
+            {
+                "name": name,
+                "slug": slug,
+                "present_col": f"present_in_{slug}",
+                "group_col": f"bioactivity_group_{slug}",
+                "value_col": f"bioactivity_value_{slug}",
+            }
+        )
+    return columns
+
+
+def add_target_report_columns(
+    df: pd.DataFrame,
+    plants_cfg: list[dict[str, Any]],
+    *,
+    predicted_rt_column: str = "predicted_hplc_rt",
+    matched_fraction_column: str = "matched_fraction",
+) -> pd.DataFrame:
+    out = df.copy()
+    plant_columns = _plant_result_columns(plants_cfg)
+
+    for spec in plant_columns:
+        for col in [spec["present_col"], spec["group_col"], spec["value_col"]]:
+            if col not in out.columns:
+                out[col] = np.nan
+
+    present_values: list[str] = []
+    absent_values: list[str] = []
+    interpretation_values: list[str] = []
+
+    for _, row in out.iterrows():
+        present_names = []
+        absent_names = []
+        activity_parts: list[tuple[int, str]] = []
+        any_evaluated = False
+
+        for spec in plant_columns:
+            present_state = _coerce_bool(row.get(spec["present_col"]))
+            if present_state is True:
+                present_names.append(spec["name"])
+                any_evaluated = True
+            elif present_state is False:
+                absent_names.append(spec["name"])
+                any_evaluated = True
+
+            group = _clean_bioactivity_group(row.get(spec["group_col"]))
+            value = _format_float(row.get(spec["value_col"]))
+            if present_state is not None and group != "No data":
+                suffix = f" ({value})" if value else ""
+                order = 0 if present_state is True else 1 if present_state is False else 2
+                activity_parts.append((order, f"{spec['name']}: {group}{suffix}"))
+
+        if not any_evaluated:
+            present_text = ""
+            absent_text = ""
+            interpretation = "Not detected above the peak-area threshold in the selected target plant columns."
+        else:
+            present_text = "; ".join(present_names)
+            absent_text = "; ".join(absent_names)
+            activity_text = " | ".join(text for _, text in sorted(activity_parts, key=lambda item: item[0]))
+            rt_text = _format_float(row.get(predicted_rt_column))
+            fraction_value = row.get(matched_fraction_column, "")
+            fraction_text = "" if pd.isna(fraction_value) else str(fraction_value).strip()
+            rt_part = f"Predicted HPLC RT {rt_text}" if rt_text else "Predicted HPLC RT unavailable"
+            if not fraction_text or fraction_text.lower() == "no predicted rt":
+                fraction_part = "no fraction assignment"
+            elif fraction_text.lower() == "fraction not collected":
+                fraction_part = "outside the collected fraction range"
+            else:
+                fraction_part = f"fraction {fraction_text}"
+            presence_part = f"Present in {_join_human_list(present_names) or 'no selected plants'}"
+            absent_part = f"; absent in {_join_human_list(absent_names)}" if absent_names else ""
+            activity_part = f". Activity: {activity_text}" if activity_text else ""
+            interpretation = f"{rt_part} -> {fraction_part}. {presence_part}{absent_part}{activity_part}."
+
+        present_values.append(present_text)
+        absent_values.append(absent_text)
+        interpretation_values.append(interpretation)
+
+    out["target_plants_present"] = present_values
+    out["target_plants_absent"] = absent_values
+    out["target_interpretation"] = interpretation_values
+    return out
+
+
+def merge_human_readable_report_by_id(
+    base_df: pd.DataFrame,
+    annotation_df: pd.DataFrame,
+    *,
+    id_column: str,
+    columns_to_add: list[str],
+    plants_cfg: list[dict[str, Any]],
+    predicted_rt_column: str = "predicted_hplc_rt",
+) -> pd.DataFrame:
+    require_columns(base_df, [id_column], "base annotation table for final report")
+    require_columns(annotation_df, [id_column] + columns_to_add, "annotation source table for final report")
+
+    def normalize_id(value: Any) -> str:
+        if pd.isna(value):
+            return ""
+        if isinstance(value, (int, np.integer)):
+            return str(int(value))
+        if isinstance(value, (float, np.floating)) and float(value).is_integer():
+            return str(int(value))
+        text = str(value).strip()
+        if text.endswith(".0"):
+            numeric = pd.to_numeric(text, errors="coerce")
+            if pd.notna(numeric) and float(numeric).is_integer():
+                return str(int(numeric))
+        return text
+
+    left = base_df.copy()
+    right = annotation_df[[id_column] + columns_to_add].drop_duplicates(subset=[id_column]).copy()
+    left["__merge_id__"] = left[id_column].map(normalize_id)
+    right["__merge_id__"] = right[id_column].map(normalize_id)
+    merged = left.merge(right.drop(columns=[id_column]), on="__merge_id__", how="left").drop(columns=["__merge_id__"])
+    merged = add_target_report_columns(
+        merged,
+        plants_cfg,
+        predicted_rt_column=predicted_rt_column,
+    )
+
+    plant_cols = []
+    internal_cols = []
+    for spec in _plant_result_columns(plants_cfg):
+        plant_cols.extend([spec["group_col"], spec["value_col"]])
+        internal_cols.append(spec["present_col"])
+    leading_cols = [
+        id_column,
+        predicted_rt_column,
+        "matched_fraction",
+        "parsed_fraction_numbers",
+        "target_plants_present",
+        "target_plants_absent",
+        *plant_cols,
+    ]
+    existing_leading = [col for col in leading_cols if col in merged.columns]
+    final_cols = ["target_interpretation"] if "target_interpretation" in merged.columns else []
+    excluded = set(existing_leading + final_cols + internal_cols)
+    remaining = [col for col in merged.columns if col not in excluded]
+    return merged[existing_leading + remaining + final_cols]
+
+
+def write_post_run_analysis(
+    combined_df: pd.DataFrame,
+    output_dir: Path,
+    *,
+    plants_cfg: list[dict[str, Any]],
+    predicted_rt_column: str,
+    total_input_count: int,
+    filtered_count: int,
+    cutoffs: list[float],
+) -> dict[str, str]:
+    analysis_dir = ensure_directory(output_dir / "Post_run_analysis")
+    figure_dir = ensure_directory(analysis_dir / "Figures")
+
+    plant_specs = _plant_result_columns(plants_cfg)
+    total_input_count = int(total_input_count)
+    filtered_count = int(filtered_count)
+    if "matched_fraction" in combined_df.columns:
+        collected_mask = ~combined_df["matched_fraction"].astype(str).isin(["Fraction not collected", "No predicted RT"])
+    else:
+        collected_mask = pd.Series(False, index=combined_df.index)
+
+    present_masks = []
+    for spec in plant_specs:
+        if spec["present_col"] in combined_df.columns:
+            present_masks.append(combined_df[spec["present_col"]].apply(_coerce_bool) == True)  # noqa: E712
+    present_any_mask = pd.concat(present_masks, axis=1).any(axis=1) if present_masks else pd.Series(False, index=combined_df.index)
+    collected_present_any_mask = collected_mask & present_any_mask
+
+    high_group = make_group_labels([float(x) for x in sorted(cutoffs)])[-1]
+    high_masks = []
+    for spec in plant_specs:
+        if spec["present_col"] in combined_df.columns and spec["group_col"] in combined_df.columns:
+            present = combined_df[spec["present_col"]].apply(_coerce_bool) == True  # noqa: E712
+            high = combined_df[spec["group_col"]].astype(str) == high_group
+            high_masks.append(present & high)
+    high_any_mask = pd.concat(high_masks, axis=1).any(axis=1) if high_masks else pd.Series(False, index=combined_df.index)
+    collected_high_any_mask = collected_mask & high_any_mask
+
+    funnel_steps = [
+        ("Total input features", total_input_count),
+        ("Above peak-area threshold", filtered_count),
+        ("Assigned to collected fractions", int(collected_mask.sum())),
+        ("Collected and present in at least one target plant", int(collected_present_any_mask.sum())),
+        ("Collected and present in highest activity group", int(collected_high_any_mask.sum())),
+    ]
+
+    overview_rows = []
+    previous_value: int | None = None
+    for metric, value in funnel_steps:
+        overview_rows.append(
+            {
+                "metric": metric,
+                "value": int(value),
+                "percent_of_total_input": round(value / total_input_count * 100, 2) if total_input_count else 0,
+                "percent_of_previous_step": round(value / previous_value * 100, 2) if previous_value else 100.0,
+            }
+        )
+        previous_value = int(value)
+
+    for spec in plant_specs:
+        present = combined_df[spec["present_col"]].apply(_coerce_bool) if spec["present_col"] in combined_df.columns else pd.Series([], dtype=object)
+        overview_rows.append(
+            {
+                "metric": f"{spec['slug']}_features_present",
+                "value": int((present == True).sum()),  # noqa: E712
+                "percent_of_total_input": round(int((present == True).sum()) / total_input_count * 100, 2) if total_input_count else 0,  # noqa: E712
+                "percent_of_previous_step": "",
+            }
+        )
+        overview_rows.append(
+            {
+                "metric": f"{spec['slug']}_features_absent",
+                "value": int((present == False).sum()),  # noqa: E712
+                "percent_of_total_input": round(int((present == False).sum()) / total_input_count * 100, 2) if total_input_count else 0,  # noqa: E712
+                "percent_of_previous_step": "",
+            }
+        )
+    overview_df = pd.DataFrame(overview_rows)
+    overview_path = write_table(overview_df, analysis_dir / "06_run_overview.csv")
+
+    plant_rows = []
+    for spec in plant_specs:
+        if spec["group_col"] not in combined_df.columns:
+            continue
+        work = combined_df[[spec["present_col"], spec["group_col"]]].copy()
+        work["presence"] = work[spec["present_col"]].apply(lambda x: "present" if _coerce_bool(x) is True else "absent")
+        work["bioactivity_group_clean"] = work[spec["group_col"]].apply(_clean_bioactivity_group)
+        counts = work.groupby(["presence", "bioactivity_group_clean"], dropna=False).size().reset_index(name="feature_count")
+        counts.insert(0, "plant", spec["name"])
+        plant_rows.extend(counts.to_dict("records"))
+    plant_summary_df = pd.DataFrame(plant_rows)
+    plant_summary_path = write_table(plant_summary_df, analysis_dir / "07_plant_presence_activity_summary.csv")
+
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from matplotlib.ticker import MaxNLocator
+
+        pastel = {
+            "blue": "#9ecae1",
+            "green": "#a1d99b",
+            "pink": "#f4b6c2",
+            "purple": "#c7b9ff",
+            "yellow": "#fddc8a",
+            "red": "#f2a7a7",
+            "gray": "#d8dee9",
+            "text": "#263238",
+        }
+
+        def save_both(fig: Any, stem: str) -> None:
+            fig.savefig(figure_dir / f"{stem}.png", bbox_inches="tight", dpi=180)
+            fig.savefig(figure_dir / f"{stem}.svg", bbox_inches="tight")
+            plt.close(fig)
+
+        funnel_df = pd.DataFrame(funnel_steps, columns=["step", "count"])
+        fig, ax = plt.subplots(figsize=(10.5, 5.8))
+        y_positions = np.arange(len(funnel_df))
+        colors = [pastel["blue"], pastel["green"], pastel["yellow"], pastel["purple"], pastel["pink"]]
+        ax.barh(y_positions, funnel_df["count"], color=colors, edgecolor="white", linewidth=1.5)
+        ax.set_yticks(y_positions)
+        ax.set_yticklabels(funnel_df["step"])
+        ax.invert_yaxis()
+        ax.set_xlabel("Feature count")
+        ax.set_title("Feature prioritization funnel")
+        ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+        max_count = max(funnel_df["count"].max(), 1)
+        for i, value in enumerate(funnel_df["count"]):
+            pct_total = value / total_input_count * 100 if total_input_count else 0
+            ax.text(value + max_count * 0.015, i, f"{value:,} ({pct_total:.1f}%)", va="center", ha="left", color=pastel["text"], fontsize=10)
+        ax.set_xlim(0, max_count * 1.22)
+        ax.grid(axis="x", alpha=0.18)
+        ax.spines[["top", "right", "left"]].set_visible(False)
+        save_both(fig, "01_feature_prioritization_funnel")
+
+        if "parsed_fraction_numbers" in combined_df.columns:
+            exploded = []
+            for value in combined_df["parsed_fraction_numbers"]:
+                exploded.extend(_parse_fraction_numbers(value))
+            if exploded:
+                fraction_counts = pd.Series(exploded).value_counts().sort_index()
+                fig, ax = plt.subplots(figsize=(12, 4.8))
+                ax.bar(fraction_counts.index.astype(str), fraction_counts.values, color=pastel["blue"], edgecolor="white", linewidth=0.8)
+                ax.set_title("Features assigned to predicted fractions")
+                ax.set_xlabel("Fraction")
+                ax.set_ylabel("Feature count")
+                ax.yaxis.set_major_locator(MaxNLocator(integer=True))
+                ax.tick_params(axis="x", labelrotation=90)
+                for idx, value in enumerate(fraction_counts.values):
+                    if value > 0 and (len(fraction_counts) <= 40 or idx % max(1, len(fraction_counts) // 24) == 0):
+                        ax.text(idx, value, f"{int(value):,}", ha="center", va="bottom", fontsize=7, color=pastel["text"])
+                ax.grid(axis="y", alpha=0.18)
+                ax.spines[["top", "right"]].set_visible(False)
+                save_both(fig, "02_feature_counts_per_fraction")
+
+        if plant_specs:
+            presence_rows = []
+            high_rows = []
+            for spec in plant_specs:
+                present = combined_df[spec["present_col"]].apply(_coerce_bool) if spec["present_col"] in combined_df.columns else pd.Series([], dtype=object)
+                presence_rows.append(
+                    {
+                        "plant": spec["name"],
+                        "present": int((present == True).sum()),  # noqa: E712
+                        "absent": int((present == False).sum()),  # noqa: E712
+                    }
+                )
+                if spec["present_col"] in combined_df.columns and spec["group_col"] in combined_df.columns:
+                    high_count = int(((present == True) & (combined_df[spec["group_col"]].astype(str) == high_group)).sum())  # noqa: E712
+                else:
+                    high_count = 0
+                high_rows.append({"plant": spec["name"], "highest_activity": high_count})
+
+            presence_df = pd.DataFrame(presence_rows).set_index("plant")
+            high_df = pd.DataFrame(high_rows).set_index("plant")
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, max(4.5, len(plant_specs) * 0.8)))
+            presence_df[["present", "absent"]].plot(kind="barh", stacked=True, ax=ax1, color=[pastel["green"], pastel["red"]], edgecolor="white")
+            ax1.set_title("Target plant presence")
+            ax1.set_xlabel("Feature count")
+            ax1.set_ylabel("")
+            ax1.xaxis.set_major_locator(MaxNLocator(integer=True))
+            for container in ax1.containers:
+                ax1.bar_label(container, label_type="center", fmt=lambda value: f"{int(value):,}" if value > 0 else "", fontsize=8, color=pastel["text"])
+            ax1.spines[["top", "right"]].set_visible(False)
+            high_df["highest_activity"].plot(kind="barh", ax=ax2, color=pastel["pink"], edgecolor="white")
+            ax2.set_title(f"Present in highest activity group ({_clean_bioactivity_group(high_group)})")
+            ax2.set_xlabel("Feature count")
+            ax2.set_ylabel("")
+            ax2.xaxis.set_major_locator(MaxNLocator(integer=True))
+            for i, value in enumerate(high_df["highest_activity"]):
+                ax2.text(value, i, f" {int(value):,}", va="center", ha="left", color=pastel["text"], fontsize=9)
+            ax2.spines[["top", "right"]].set_visible(False)
+            fig.tight_layout()
+            save_both(fig, "03_plant_presence_and_high_activity")
+
+        for spec in plant_specs:
+            subset = plant_summary_df[plant_summary_df["plant"] == spec["name"]] if not plant_summary_df.empty else pd.DataFrame()
+            if subset.empty:
+                continue
+            pivot = subset.pivot_table(index="bioactivity_group_clean", columns="presence", values="feature_count", fill_value=0, aggfunc="sum")
+            fig, ax = plt.subplots(figsize=(8.5, 4.8))
+            pivot.plot(kind="bar", stacked=False, ax=ax, color=[pastel["red"], pastel["green"]])
+            ax.set_title(f"{spec['name']}: features by activity group")
+            ax.set_xlabel("Bioactivity group")
+            ax.set_ylabel("Feature count")
+            ax.yaxis.set_major_locator(MaxNLocator(integer=True))
+            ax.tick_params(axis="x", labelrotation=35)
+            for container in ax.containers:
+                ax.bar_label(container, fmt=lambda value: f"{int(value):,}" if value > 0 else "", fontsize=8)
+            ax.grid(axis="y", alpha=0.18)
+            ax.spines[["top", "right"]].set_visible(False)
+            save_both(fig, f"04_activity_presence_{spec['slug']}")
+    except Exception as exc:
+        LOGGER.warning("Post-run chart creation skipped: %s", exc)
+
+    return {
+        "run_overview": str(overview_path),
+        "plant_presence_activity_summary": str(plant_summary_path),
+        "figures_dir": str(figure_dir),
+    }
+
+
 # ---------------------------
 # Pipeline
 # ---------------------------
@@ -610,7 +1032,8 @@ def load_calibration_model_from_config(config: dict[str, Any], *, base_dir: str 
 
 def run_pipeline(config: dict[str, Any]) -> dict[str, Any]:
     base_dir = Path(config.get("base_dir", Path(__file__).resolve().parent))
-    output_dir = ensure_directory(base_dir / config.get("output_dir", "Outputs"))
+    output_value = Path(config.get("output_dir", "Outputs"))
+    output_dir = ensure_directory(output_value if output_value.is_absolute() else base_dir / output_value)
 
     feature_cfg = config["feature_table"]
     feature_path = resolve_path(base_dir, feature_cfg["path"])
@@ -707,25 +1130,37 @@ def run_pipeline(config: dict[str, Any]) -> dict[str, Any]:
     if append_cfg:
         append_path = resolve_path(base_dir, append_cfg["path"])
         append_df = read_table(append_path)
-        bioactivity_columns = [
-            c for c in combined_df.columns if c.startswith("bioactivity_group_") or c.startswith("bioactivity_value_")
-        ]
+        plant_result_cols = []
+        for spec in _plant_result_columns(plants_cfg):
+            plant_result_cols.extend([spec["present_col"], spec["group_col"], spec["value_col"]])
         merge_columns = [
             config.get("predicted_rt_column", "predicted_hplc_rt"),
             "matched_fraction",
             "parsed_fraction_numbers",
-            *bioactivity_columns,
+            *plant_result_cols,
         ]
-        merged_df = append_columns_by_id(
+        merged_df = merge_human_readable_report_by_id(
             append_df,
             combined_df,
             id_column=append_cfg.get("id_column", resolved_id_column),
             columns_to_add=merge_columns,
-            missing_fill_text=append_cfg.get("missing_fill_text", "Not present in target plants"),
-            status_column=append_cfg.get("status_column", "target_plant_status"),
+            plants_cfg=plants_cfg,
+            predicted_rt_column=config.get("predicted_rt_column", "predicted_hplc_rt"),
         )
         merged_path = write_table(merged_df, output_dir / "05_appended_feature_table_with_bioactivity.csv")
+        extra_outputs["human_readable_feature_report"] = str(merged_path)
         extra_outputs["appended_feature_table"] = str(merged_path)
+
+    analysis_outputs = write_post_run_analysis(
+        combined_df,
+        output_dir,
+        plants_cfg=plants_cfg,
+        predicted_rt_column=config.get("predicted_rt_column", "predicted_hplc_rt"),
+        total_input_count=int(len(feature_df)),
+        filtered_count=int(len(filtered_df)),
+        cutoffs=[float(x) for x in config.get("bioactivity", {}).get("cutoffs", [16.5, 22.5])],
+    )
+    extra_outputs.update(analysis_outputs)
 
     summary = {
         "input_feature_table": str(feature_path),
@@ -782,6 +1217,14 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def load_config(path: str | Path, *, base_dir: str | Path | None = None) -> dict[str, Any]:
+    config_path = Path(path).resolve()
+    with open(config_path, "r", encoding="utf-8") as handle:
+        config = json.load(handle)
+    config["base_dir"] = str(base_dir or config_path.parent)
+    return config
+
+
 
 def main(argv: Optional[list[str]] = None) -> int:
     parser = build_parser()
@@ -792,14 +1235,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         format="%(levelname)s: %(message)s",
     )
 
-    config_path = Path(args.config).resolve()
-    with open(config_path, "r", encoding="utf-8") as handle:
-        config = json.load(handle)
-
-    if args.base_dir is not None:
-        config["base_dir"] = args.base_dir
-    else:
-        config.setdefault("base_dir", str(config_path.parent))
+    config = load_config(args.config, base_dir=args.base_dir)
 
     summary = run_pipeline(config)
     print(json.dumps(summary, indent=2))
