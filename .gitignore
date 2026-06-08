@@ -1,0 +1,31 @@
+# Python generated files
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Local GUI/config state
+.p_*_gui_state.json
+.p_*_state.json
+*.log
+
+# Local data and generated outputs
+data/
+output/
+outputs/
+Outputs/
+test_outputs/
+Post_run_analysis/
+*.tmp
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.vscode/*.log
+
+# Conda/pip build artifacts
+*.egg-info/
+build/
+dist/

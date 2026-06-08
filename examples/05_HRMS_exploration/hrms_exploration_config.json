@@ -1,0 +1,60 @@
+{
+  "output_dir": "output",
+  "run_steps": {
+    "write_prepared_table": true,
+    "write_annotation_table": true,
+    "run_analysis": true
+  },
+  "feature_table": {
+    "path": "feature_table.csv",
+    "id_column": "row ID",
+    "columns_to_keep": ["row m/z"],
+    "sample_selection": {
+      "method": "prefix_suffix",
+      "prefix": "",
+      "suffix": ".mzML Peak area",
+      "columns": [],
+      "exclude_columns": ["row ID", "row m/z"],
+      "numeric_only": true
+    }
+  },
+  "sample_metadata": {
+    "enabled": true,
+    "path": "metadata.csv",
+    "key_column": "Filename",
+    "value_column": "Sample name",
+    "strip_suffix_before_mapping": ".mzML Peak area",
+    "strip_prefix_before_mapping": "",
+    "fallback": "original",
+    "aggregate_duplicate_labels": false,
+    "aggregation": "sum"
+  },
+  "annotation_table": {
+    "path": "annotations.csv",
+    "feature_id_column": "row ID",
+    "annotation_id_column": "mappingFeatureId",
+    "feature_id_parser": "numeric",
+    "annotation_id_parser": "numeric",
+    "columns_to_add": ["molecularFormula", "NPC#pathway", "NPC#superclass", "NPC#class"],
+    "missing_fill": null
+  },
+  "analysis": {
+    "enabled": true,
+    "annotation_column": "NPC#class",
+    "threshold": 100000,
+    "top_n": 5,
+    "terms": ["Isoquinoline alkaloids"],
+    "match_mode": "exact",
+    "case_sensitive": false,
+    "selected_samples": [],
+    "samples_for_top_annotations": [],
+    "make_counts_table": true,
+    "make_selected_terms_plot": true,
+    "make_top_annotations_plot": true,
+    "drop_missing_annotation": true,
+    "plot_format": "svg",
+    "font_family": "Arial",
+    "svg_text": true
+  }
+}
+

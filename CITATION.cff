@@ -1,0 +1,33 @@
+cff-version: 1.2.0
+message: "If you use this workflow, please cite the associated paper or preprint."
+title: "Microfractionation computational workflow"
+authors:
+  - family-names: "Bouchal"
+    given-names: "Erik"
+  - family-names: "Smith"
+    given-names: "Joshua David"
+  - family-names: "Damiani"
+    given-names: "Tito"
+  - family-names: "Pluskal"
+    given-names: "Tom"
+  - family-names: "Hebra"
+    given-names: "Teo"
+version: "0.1.0"
+date-released: "2026-05-20"
+license: "MIT"
+preferred-citation:
+  type: article
+  title: "Accelerated characterization of active natural extracts with single-step microfractionation coupled to mass spectrometry and bioassays"
+  doi: "10.26434/chemrxiv-2025-w4xhx"
+  year: 2025
+  authors:
+    - family-names: "Smith"
+      given-names: "Joshua David"
+    - family-names: "Bouchal"
+      given-names: "Erik"
+    - family-names: "Damiani"
+      given-names: "Tito"
+    - family-names: "Pluskal"
+      given-names: "Tom"
+    - family-names: "Hebra"
+      given-names: "Teo"

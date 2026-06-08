@@ -1,0 +1,3 @@
+anchor_id,hrms_feature_id,hrms_rt,hplc_feature_id,hplc_fraction
+A1,1,1.00,HPLC_anchor_1,1
+A2,3,3.00,HPLC_anchor_2,4

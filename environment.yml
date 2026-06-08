@@ -1,0 +1,16 @@
+name: microfractionation
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pandas
+  - numpy
+  - matplotlib
+  - requests
+  - pymzml
+  - openpyxl
+  - pillow
+  - rdkit
+  - pip
+  - pip:
+      - customtkinter
