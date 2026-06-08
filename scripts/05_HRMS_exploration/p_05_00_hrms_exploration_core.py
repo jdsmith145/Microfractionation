@@ -13,8 +13,10 @@ The same functions are used by the command-line interface and by the GUI.
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import logging
+import math
 import re
 from pathlib import Path
 from typing import Any, Iterable, Optional
@@ -457,11 +459,8 @@ def maybe_merge_annotations(
 # ---------------------------
 
 def set_matplotlib_style(font_family: str = "Arial", svg_text: bool = True) -> None:
-    import matplotlib as mpl
-
-    mpl.rcParams["font.family"] = font_family
-    if svg_text:
-        mpl.rcParams["svg.fonttype"] = "none"
+    """Kept for config compatibility; HRMS bar charts are rendered without Matplotlib."""
+    return None
 
 
 def detect_sample_columns_from_final_table(
@@ -483,6 +482,50 @@ def detect_sample_columns_from_final_table(
     if not samples:
         raise ValueError("Could not detect numeric sample columns in the final table.")
     return samples
+
+
+def resolve_analysis_sample_columns(
+    df: pd.DataFrame,
+    requested_samples: list[str],
+    *,
+    sample_columns: list[str],
+    preparation_info: Optional[dict[str, Any]] = None,
+    table_name: str = "final feature table",
+) -> list[str]:
+    """Resolve saved raw sample names to their renamed display columns when needed."""
+    if not requested_samples:
+        return []
+
+    preparation_info = preparation_info or {}
+    originals = comma_list(preparation_info.get("sample_columns_original"))
+    renamed = comma_list(preparation_info.get("sample_columns_renamed")) or sample_columns
+
+    aliases: dict[str, str] = {}
+    for original, renamed_column in zip(originals, renamed):
+        aliases[original] = renamed_column
+        aliases[renamed_column] = renamed_column
+    for column in sample_columns:
+        aliases.setdefault(column, column)
+
+    resolved: list[str] = []
+    missing: list[str] = []
+    for requested in requested_samples:
+        if requested in df.columns:
+            resolved.append(requested)
+            continue
+        alias = aliases.get(requested)
+        if alias and alias in df.columns:
+            resolved.append(alias)
+            continue
+        missing.append(requested)
+
+    if missing:
+        available = [c for c in sample_columns if c in df.columns]
+        raise KeyError(
+            f"Missing required columns in {table_name}: {missing}. "
+            f"Available sample columns after metadata renaming: {available}"
+        )
+    return list(dict.fromkeys(resolved))
 
 
 def make_annotation_mask(
@@ -592,6 +635,166 @@ def top_annotations_for_sample(
     return counts.rename_axis(annotation_column).reset_index(name="count")
 
 
+def _nice_axis_max(value: float) -> float:
+    if value <= 0:
+        return 1.0
+    magnitude = 10 ** math.floor(math.log10(value))
+    scaled = value / magnitude
+    if scaled <= 2:
+        nice = 2
+    elif scaled <= 5:
+        nice = 5
+    else:
+        nice = 10
+    return nice * magnitude
+
+
+def _format_tick(value: float) -> str:
+    return str(int(value)) if abs(value - int(value)) < 1e-9 else f"{value:g}"
+
+
+def _write_bar_svg(
+    labels: list[str],
+    values: list[float],
+    *,
+    title: str,
+    xlabel: str,
+    ylabel: str,
+    output_path: str | Path,
+    figsize: tuple[float, float],
+    rotation: int,
+) -> None:
+    width = max(640, int(figsize[0] * 96))
+    height = max(420, int(figsize[1] * 96))
+    left, right, top, bottom = 86, 30, 58, 142 if rotation else 88
+    plot_w = max(80, width - left - right)
+    plot_h = max(80, height - top - bottom)
+    ymax = _nice_axis_max(max(values) if values else 0)
+    bar_gap = 0.22
+    slot_w = plot_w / max(1, len(values))
+    bar_w = max(4, slot_w * (1 - bar_gap))
+    color = "#74a9cf"
+    axis_color = "#222222"
+    grid_color = "#d6dde5"
+
+    lines = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
+        '<rect width="100%" height="100%" fill="white"/>',
+        f'<text x="{width / 2:.1f}" y="30" text-anchor="middle" font-family="Arial, sans-serif" font-size="22" fill="#111111">{html.escape(title)}</text>',
+    ]
+
+    ticks = 5
+    for i in range(ticks + 1):
+        value = ymax * i / ticks
+        y_pos = top + plot_h - (value / ymax * plot_h)
+        lines.append(f'<line x1="{left}" y1="{y_pos:.1f}" x2="{left + plot_w}" y2="{y_pos:.1f}" stroke="{grid_color}" stroke-width="1"/>')
+        lines.append(f'<text x="{left - 10}" y="{y_pos + 4:.1f}" text-anchor="end" font-family="Arial, sans-serif" font-size="12" fill="{axis_color}">{_format_tick(value)}</text>')
+
+    lines.append(f'<line x1="{left}" y1="{top}" x2="{left}" y2="{top + plot_h}" stroke="{axis_color}" stroke-width="1.5"/>')
+    lines.append(f'<line x1="{left}" y1="{top + plot_h}" x2="{left + plot_w}" y2="{top + plot_h}" stroke="{axis_color}" stroke-width="1.5"/>')
+
+    for idx, (label, value) in enumerate(zip(labels, values)):
+        x0 = left + idx * slot_w + (slot_w - bar_w) / 2
+        bar_h = 0 if ymax <= 0 else value / ymax * plot_h
+        y0 = top + plot_h - bar_h
+        center = x0 + bar_w / 2
+        lines.append(f'<rect x="{x0:.1f}" y="{y0:.1f}" width="{bar_w:.1f}" height="{bar_h:.1f}" fill="{color}"/>')
+        lines.append(f'<text x="{center:.1f}" y="{max(top + 12, y0 - 5):.1f}" text-anchor="middle" font-family="Arial, sans-serif" font-size="11" fill="#222222">{_format_tick(value)}</text>')
+        if rotation:
+            label_y = top + plot_h + 18
+            lines.append(
+                f'<text x="{center:.1f}" y="{label_y:.1f}" text-anchor="end" transform="rotate(-45 {center:.1f} {label_y:.1f})" '
+                f'font-family="Arial, sans-serif" font-size="12" fill="{axis_color}">{html.escape(label)}</text>'
+            )
+        else:
+            lines.append(f'<text x="{center:.1f}" y="{top + plot_h + 22:.1f}" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" fill="{axis_color}">{html.escape(label)}</text>')
+
+    lines.append(f'<text x="{left + plot_w / 2:.1f}" y="{height - 14}" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" fill="{axis_color}">{html.escape(xlabel)}</text>')
+    lines.append(
+        f'<text x="20" y="{top + plot_h / 2:.1f}" text-anchor="middle" transform="rotate(-90 20 {top + plot_h / 2:.1f})" '
+        f'font-family="Arial, sans-serif" font-size="14" fill="{axis_color}">{html.escape(ylabel)}</text>'
+    )
+    lines.append("</svg>")
+    Path(output_path).write_text("\n".join(lines), encoding="utf-8")
+
+
+def _load_pil_font(size: int):
+    from PIL import ImageFont
+
+    for name in ("arial.ttf", "DejaVuSans.ttf"):
+        try:
+            return ImageFont.truetype(name, size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
+
+
+def _write_bar_png(
+    labels: list[str],
+    values: list[float],
+    *,
+    title: str,
+    xlabel: str,
+    ylabel: str,
+    output_path: str | Path,
+    figsize: tuple[float, float],
+    rotation: int,
+) -> None:
+    from PIL import Image, ImageDraw
+
+    width = max(640, int(figsize[0] * 120))
+    height = max(420, int(figsize[1] * 120))
+    left, right, top, bottom = 104, 36, 70, 174 if rotation else 96
+    plot_w = max(80, width - left - right)
+    plot_h = max(80, height - top - bottom)
+    ymax = _nice_axis_max(max(values) if values else 0)
+    slot_w = plot_w / max(1, len(values))
+    bar_w = max(5, slot_w * 0.78)
+
+    image = Image.new("RGB", (width, height), "white")
+    draw = ImageDraw.Draw(image)
+    title_font = _load_pil_font(26)
+    axis_font = _load_pil_font(16)
+    tick_font = _load_pil_font(13)
+    label_font = _load_pil_font(13)
+    axis_color = "#222222"
+    grid_color = "#d6dde5"
+    color = "#74a9cf"
+
+    draw.text((width / 2, 22), title, fill="#111111", font=title_font, anchor="mm")
+    for i in range(6):
+        value = ymax * i / 5
+        y_pos = top + plot_h - (value / ymax * plot_h)
+        draw.line((left, y_pos, left + plot_w, y_pos), fill=grid_color, width=1)
+        draw.text((left - 10, y_pos), _format_tick(value), fill=axis_color, font=tick_font, anchor="rm")
+    draw.line((left, top, left, top + plot_h), fill=axis_color, width=2)
+    draw.line((left, top + plot_h, left + plot_w, top + plot_h), fill=axis_color, width=2)
+
+    for idx, (label, value) in enumerate(zip(labels, values)):
+        x0 = left + idx * slot_w + (slot_w - bar_w) / 2
+        bar_h = 0 if ymax <= 0 else value / ymax * plot_h
+        y0 = top + plot_h - bar_h
+        center = x0 + bar_w / 2
+        draw.rectangle((x0, y0, x0 + bar_w, top + plot_h), fill=color)
+        draw.text((center, max(top + 10, y0 - 8)), _format_tick(value), fill=axis_color, font=tick_font, anchor="ms")
+        if rotation:
+            label_image = Image.new("RGBA", (260, 28), (255, 255, 255, 0))
+            label_draw = ImageDraw.Draw(label_image)
+            label_draw.text((258, 14), label, fill=axis_color, font=label_font, anchor="rm")
+            rotated = label_image.rotate(45, expand=True)
+            image.paste(rotated, (int(center - rotated.width + 8), int(top + plot_h + 6)), rotated)
+        else:
+            draw.text((center, top + plot_h + 20), label, fill=axis_color, font=label_font, anchor="mt")
+
+    draw.text((left + plot_w / 2, height - 20), xlabel, fill=axis_color, font=axis_font, anchor="mm")
+    y_label = Image.new("RGBA", (plot_h, 32), (255, 255, 255, 0))
+    y_draw = ImageDraw.Draw(y_label)
+    y_draw.text((plot_h / 2, 16), ylabel, fill=axis_color, font=axis_font, anchor="mm")
+    y_label = y_label.rotate(90, expand=True)
+    image.paste(y_label, (10, int(top + plot_h / 2 - y_label.height / 2)), y_label)
+    image.save(output_path)
+
+
 def plot_bar(
     df: pd.DataFrame,
     *,
@@ -605,26 +808,29 @@ def plot_bar(
     rotation: int = 45,
     preview_png_path: str | Path | None = None,
 ) -> Path:
-    import matplotlib.pyplot as plt
-
     out = Path(output_path)
     ensure_directory(out.parent)
-    fig, ax = plt.subplots(figsize=figsize)
-    ax.bar(df[x].astype(str), df[y])
-    ax.set_title(title)
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel(ylabel)
-    ax.tick_params(axis="x", labelrotation=rotation)
-    for label in ax.get_xticklabels():
-        label.set_ha("right" if rotation else "center")
-    fig.tight_layout()
-    fig.savefig(out, bbox_inches="tight", dpi=300)
+
+    labels = [str(v) for v in df[x].tolist()]
+    values = [float(v) if pd.notna(v) else 0.0 for v in pd.to_numeric(df[y], errors="coerce").fillna(0).tolist()]
+    if out.suffix.lower() == ".png":
+        _write_bar_png(labels, values, title=title, xlabel=xlabel, ylabel=ylabel, output_path=out, figsize=figsize, rotation=rotation)
+    else:
+        _write_bar_svg(labels, values, title=title, xlabel=xlabel, ylabel=ylabel, output_path=out, figsize=figsize, rotation=rotation)
     if preview_png_path is not None:
         preview_out = Path(preview_png_path)
         ensure_directory(preview_out.parent)
         if preview_out.resolve() != out.resolve():
-            fig.savefig(preview_out, bbox_inches="tight", dpi=160)
-    plt.close(fig)
+            _write_bar_png(
+                labels,
+                values,
+                title=title,
+                xlabel=xlabel,
+                ylabel=ylabel,
+                output_path=preview_out,
+                figsize=figsize,
+                rotation=rotation,
+            )
     return out
 
 
@@ -636,6 +842,7 @@ def run_analysis_outputs(
     id_column: str,
     sample_columns: list[str],
     annotation_columns: list[str],
+    preparation_info: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     analysis_cfg = config.get("analysis") or {}
     if not analysis_cfg.get("enabled", True):
@@ -654,7 +861,12 @@ def run_analysis_outputs(
     terms = comma_list(analysis_cfg.get("terms"))
     match_mode = analysis_cfg.get("match_mode", "exact")
     case_sensitive = bool(analysis_cfg.get("case_sensitive", False))
-    selected_samples = comma_list(analysis_cfg.get("selected_samples"))
+    selected_samples = resolve_analysis_sample_columns(
+        df_final,
+        comma_list(analysis_cfg.get("selected_samples")),
+        sample_columns=sample_columns,
+        preparation_info=preparation_info,
+    )
     plot_format = analysis_cfg.get("plot_format", "svg").lstrip(".") or "svg"
 
     actual_sample_columns = detect_sample_columns_from_final_table(
@@ -719,7 +931,12 @@ def run_analysis_outputs(
         outputs["files"]["selected_terms_across_samples_preview_png"] = str(term_preview_path)
         LOGGER.info("Wrote selected-term plot: %s", term_plot)
 
-    samples_for_top = comma_list(analysis_cfg.get("samples_for_top_annotations"))
+    samples_for_top = resolve_analysis_sample_columns(
+        df_final,
+        comma_list(analysis_cfg.get("samples_for_top_annotations")),
+        sample_columns=sample_columns,
+        preparation_info=preparation_info,
+    )
     if bool(analysis_cfg.get("make_top_annotations_plot", True)) and samples_for_top:
         top_outputs: dict[str, dict[str, str]] = {}
         for sample in samples_for_top:
@@ -838,6 +1055,7 @@ def run_pipeline(config: dict[str, Any]) -> dict[str, Any]:
             id_column=id_column,
             sample_columns=sample_columns,
             annotation_columns=annotation_columns,
+            preparation_info=prep_info,
         )
     else:
         analysis_info = {"enabled": False, "skipped_by_user": True}
