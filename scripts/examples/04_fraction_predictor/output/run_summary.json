@@ -1,0 +1,38 @@
+{
+  "input_feature_table": "examples\\04_fraction_predictor\\feature_table.csv",
+  "resolved_id_column": "row ID",
+  "generated_id_column": false,
+  "calibration": {
+    "slope": 1.0,
+    "intercept": 1.0,
+    "method": "pairs",
+    "r_squared": 1.0,
+    "n_points": 5,
+    "source": "examples\\04_fraction_predictor\\calibration_pairs.csv",
+    "x_label": "UPLC RT",
+    "y_label": "HPLC RT"
+  },
+  "n_rows_input": 4,
+  "n_rows_filtered": 3,
+  "output_dir": "examples\\04_fraction_predictor\\output",
+  "files": {
+    "final_feature_table": "examples\\04_fraction_predictor\\output\\final_feature_table_with_fraction_activity.csv",
+    "human_readable_feature_report": "examples\\04_fraction_predictor\\output\\final_feature_table_with_fraction_activity.csv",
+    "appended_feature_table": "examples\\04_fraction_predictor\\output\\final_feature_table_with_fraction_activity.csv",
+    "run_overview": "examples\\04_fraction_predictor\\output\\Post_run_analysis\\06_run_overview.csv",
+    "plant_presence_activity_summary": "examples\\04_fraction_predictor\\output\\Post_run_analysis\\07_plant_presence_activity_summary.csv",
+    "figures_dir": "examples\\04_fraction_predictor\\output\\Post_run_analysis\\Figures"
+  },
+  "plants": [
+    {
+      "name": "Demo plant A",
+      "slug": "Demo_plant_A",
+      "file": "examples\\04_fraction_predictor\\output\\Demo_plant_A_bioactivity_by_fraction.csv"
+    },
+    {
+      "name": "Demo plant B",
+      "slug": "Demo_plant_B",
+      "file": "examples\\04_fraction_predictor\\output\\Demo_plant_B_bioactivity_by_fraction.csv"
+    }
+  ]
+}

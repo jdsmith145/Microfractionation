@@ -45,6 +45,10 @@ OUTPUT_COLUMNS = [
 CONFIG_VERSION = 2
 PARAMETER_WARNING_FAILURE = "Exiting because some parameter sets have been updated"
 WINDOWS_FORBIDDEN_CHARS = set('<>:"/\\|?*')
+DEFAULT_BATCH_DIR = "outputs/configured_batches"
+DEFAULT_COMPLETE_FEATURE_DIR = "outputs/complete_feature_table"
+DEFAULT_FRACTION_FEATURE_DIR = "outputs/fraction_feature_tables"
+DEFAULT_FILTERED_FEATURE_DIR = "outputs/filtered_feature_table"
 
 
 class PipelineError(RuntimeError):
@@ -82,6 +86,8 @@ class MatchSettings:
     outdir: Path
     mz_tol: float = DEFAULT_MZ_TOL
     rt_tol: float = DEFAULT_RT_TOL
+    target_mz: list[float] | None = None
+    target_mz_tolerance: float = 0.1
 
 
 @dataclass(frozen=True)
@@ -352,14 +358,7 @@ def _set_csv_export_path(export_step: ET.Element, feature_dir: str, template_idx
     if current_file is None:
         return
 
-    old_path = (current_file.text or "").strip()
-    old_name = _basename_from_path(old_path) or f"frac_{new_idx}.csv"
-    new_name = re.sub(rf"_{re.escape(template_idx)}\b", f"_{new_idx}", old_name)
-
-    if new_name == old_name and template_idx != new_idx and not re.search(rf"_{re.escape(new_idx)}\b", old_name):
-        stem = Path(old_name).stem
-        suffix = Path(old_name).suffix or ".csv"
-        new_name = f"{stem}_{new_idx}{suffix}"
+    new_name = f"frac_{new_idx}.csv"
 
     new_full = _join_dir_and_filename(feature_dir, new_name)
     current_file.text = new_full
@@ -452,6 +451,9 @@ def run_complete_from_settings(settings: CompleteBatchSettings | dict[str, Any])
     _validate_mzml_files(settings.blank_files, "BLANK")
 
     out_path = complete_output_path(settings.out_dir, sample_name)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    if settings.feature_dir:
+        Path(settings.feature_dir).expanduser().mkdir(parents=True, exist_ok=True)
     blank_pattern = (settings.blank_pattern or "").strip() or DEFAULT_BLANK_PATTERN
     n_import, n_blank, n_filename = configure_complete_mzbatch(
         template_path=template_path,
@@ -491,6 +493,8 @@ def run_fraction_from_settings(settings: FractionBatchSettings | dict[str, Any])
         raise ValueError("Select directory for per-fraction CSV feature tables.")
 
     out_path = fraction_output_path(settings.out_dir, sample_name)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    Path(settings.feature_dir).expanduser().mkdir(parents=True, exist_ok=True)
     n_fractions, template_idx = replicate_fraction_mzbatch(
         template_path=template_path,
         out_path=out_path,
@@ -605,7 +609,168 @@ def match_rows_to_big(
 
 
 def output_path_for(sample_name: str, outdir: Path) -> Path:
-    return outdir / f"{slugify(sample_name)}_filtered.csv"
+    return outdir / f"{slugify(sample_name)}_filtered_feature_table.csv"
+
+
+
+def parse_target_mz_values(value: Any) -> list[float]:
+    """Parse optional target m/z values from config or GUI text.
+
+    Accepted input formats are a single number, a list of numbers, or text with
+    values separated by commas, semicolons, whitespace, or new lines. Empty input
+    means that only the dominant-feature proportion will be exported.
+    """
+    if value is None:
+        return []
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return [float(value)]
+    if isinstance(value, (list, tuple, set)):
+        parsed: list[float] = []
+        for item in value:
+            parsed.extend(parse_target_mz_values(item))
+        return parsed
+    raw = str(value).strip()
+    if not raw:
+        return []
+    tokens = [token for token in re.split(r"[,;\s]+", raw) if token]
+    parsed = []
+    for token in tokens:
+        try:
+            parsed.append(float(token))
+        except ValueError as exc:
+            raise ValueError(f"Target m/z value '{token}' is not a valid number.") from exc
+    return parsed
+
+def safe_mz_label(value: float) -> str:
+    return f"{float(value):.6f}".rstrip("0").rstrip(".").replace(".", "p").replace("-", "minus")
+
+def purity_output_path_for(sample_name: str, outdir: Path) -> Path:
+    return outdir / f"{slugify(sample_name)}_fraction_purity_estimates.csv"
+
+
+def compute_fraction_purity(
+    filtered_df: pd.DataFrame,
+    *,
+    target_mz: float | list[float] | tuple[float, ...] | None = None,
+    target_mz_tolerance: float = 0.1,
+) -> pd.DataFrame:
+    """Estimate per-fraction MS peak-area composition from the filtered feature table.
+
+    The dominant-feature proportion and target-m/z proportion are relative MS peak-area
+    estimates. They are useful prioritization proxies, not detector-independent chemical purity.
+    """
+    columns = [
+        "fraction_index",
+        "total_area",
+        "dominant_mz",
+        "dominant_rt",
+        "dominant_area",
+        "dominant_area_proportion_percent",
+    ]
+    target_mz_values = parse_target_mz_values(target_mz)
+    if len(target_mz_values) == 1:
+        columns.extend([
+            "target_mz",
+            "target_feature_count",
+            "target_area",
+            "target_area_proportion_percent",
+        ])
+    elif len(target_mz_values) > 1:
+        for index, value in enumerate(target_mz_values, start=1):
+            label = safe_mz_label(value)
+            columns.extend([
+                f"target_{index}_mz",
+                f"target_{index}_feature_count",
+                f"target_{index}_area",
+                f"target_{index}_mz_{label}_area_proportion_percent",
+            ])
+    if filtered_df.empty:
+        return pd.DataFrame(columns=columns)
+
+    required = {"fraction_index", "mz", "rt", "area"}
+    missing = required - set(filtered_df.columns)
+    if missing:
+        raise ValueError(f"Cannot compute fraction purity estimates; missing columns: {sorted(missing)}")
+
+    df = filtered_df.copy()
+    for col in ["fraction_index", "mz", "rt", "area"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df = df.dropna(subset=["fraction_index", "mz", "rt", "area"])
+    df = df[df["area"] > 0].copy()
+    if df.empty:
+        return pd.DataFrame(columns=columns)
+
+    total = (
+        df.groupby("fraction_index", as_index=False)["area"]
+        .sum()
+        .rename(columns={"area": "total_area"})
+    )
+    dominant_idx = df.groupby("fraction_index")["area"].idxmax()
+    dominant = (
+        df.loc[dominant_idx, ["fraction_index", "mz", "rt", "area"]]
+        .rename(columns={"mz": "dominant_mz", "rt": "dominant_rt", "area": "dominant_area"})
+    )
+    out = total.merge(dominant, on="fraction_index", how="left")
+    out["dominant_area_proportion_percent"] = np.where(
+        out["total_area"] > 0,
+        100.0 * out["dominant_area"] / out["total_area"],
+        np.nan,
+    )
+
+    if target_mz_values:
+        tolerance = float(target_mz_tolerance)
+        if tolerance < 0:
+            raise ValueError("Target m/z tolerance must be greater than or equal to zero.")
+
+        for index, value in enumerate(target_mz_values, start=1):
+            prefix = "target" if len(target_mz_values) == 1 else f"target_{index}"
+            target_rows = df.loc[(df["mz"] - float(value)).abs() <= tolerance]
+            target = (
+                target_rows.groupby("fraction_index", as_index=False)
+                .agg(**{
+                    f"{prefix}_feature_count": ("area", "size"),
+                    f"{prefix}_area": ("area", "sum"),
+                })
+            )
+            out = out.merge(target, on="fraction_index", how="left")
+            out[f"{prefix}_feature_count"] = out[f"{prefix}_feature_count"].fillna(0).astype(int)
+            out[f"{prefix}_area"] = out[f"{prefix}_area"].fillna(0.0)
+            out[f"{prefix}_mz"] = float(value)
+            proportion_col = "target_area_proportion_percent" if len(target_mz_values) == 1 else f"{prefix}_mz_{safe_mz_label(value)}_area_proportion_percent"
+            out[proportion_col] = np.where(
+                out["total_area"] > 0,
+                100.0 * out[f"{prefix}_area"] / out["total_area"],
+                np.nan,
+            )
+
+
+        ordered = [
+            "fraction_index",
+            "total_area",
+            "dominant_mz",
+            "dominant_rt",
+            "dominant_area",
+            "dominant_area_proportion_percent",
+        ]
+        if len(target_mz_values) == 1:
+            ordered.extend([
+                "target_mz",
+                "target_feature_count",
+                "target_area",
+                "target_area_proportion_percent",
+            ])
+        else:
+            for index, value in enumerate(target_mz_values, start=1):
+                label = safe_mz_label(value)
+                ordered.extend([
+                    f"target_{index}_mz",
+                    f"target_{index}_feature_count",
+                    f"target_{index}_area",
+                    f"target_{index}_mz_{label}_area_proportion_percent",
+                ])
+        out = out[ordered]
+
+    return out.sort_values("fraction_index", kind="stable").reset_index(drop=True)
 
 
 def run_match(settings: MatchSettings) -> dict[str, object]:
@@ -686,17 +851,28 @@ def run_match(settings: MatchSettings) -> dict[str, object]:
 
     outdir.mkdir(parents=True, exist_ok=True)
     out_path = output_path_for(sample_name, outdir)
+    purity_path = purity_output_path_for(sample_name, outdir)
     out_df = pd.concat(matched_records, ignore_index=True) if matched_records else pd.DataFrame(columns=OUTPUT_COLUMNS)
     out_df.to_csv(out_path, index=False)
+    purity_df = compute_fraction_purity(
+        out_df,
+        target_mz=settings.target_mz,
+        target_mz_tolerance=settings.target_mz_tolerance,
+    )
+    purity_df.to_csv(purity_path, index=False)
     LOGGER.info("Saved %s matched row(s) to %s.", len(out_df), out_path)
+    LOGGER.info("Saved fraction purity estimates to %s.", purity_path)
 
     return {
         "output_path": out_path,
+        "purity_output_path": purity_path,
         "fraction_file_count": len(fraction_files),
         "fraction_files_with_positive_rows": files_with_rows,
         "positive_fraction_rows": positive_rows,
         "matched_rows": matched_rows,
         "big_rows": len(big),
+        "target_mz": settings.target_mz or [],
+        "target_mz_tolerance": settings.target_mz_tolerance,
     }
 
 
@@ -723,20 +899,20 @@ def template_config() -> dict[str, Any]:
         "stages": list(DEFAULT_STAGES),
         "complete": {
             "template_path": "templates/big_empty_template.mzbatch",
-            "out_dir": "outputs/configured_batches",
-            "feature_dir": "outputs/complete_feature_table_csv",
+            "out_dir": DEFAULT_BATCH_DIR,
+            "feature_dir": DEFAULT_COMPLETE_FEATURE_DIR,
             "blank_pattern": "*blank*",
         },
         "fraction": {
             "template_path": "templates/fraction_empty_template.mzbatch",
-            "out_dir": "outputs/configured_batches",
-            "feature_dir": "outputs/fraction_feature_tables_csv",
+            "out_dir": DEFAULT_BATCH_DIR,
+            "feature_dir": DEFAULT_FRACTION_FEATURE_DIR,
             "rt_start": 2.0,
             "rt_end": 38.0,
             "width": 0.375,
         },
         "mzmine": {
-            "executable": "C:/Program Files/MZmine/mzmine_console.exe",
+            "executable": "mzmine_Windows_portable_4.7.8/mzmine_console.exe",
             "user_file": "",
             "temp_dir": "outputs/mzmine_temp",
             "memory": DEFAULT_MEMORY_MODE,
@@ -744,9 +920,11 @@ def template_config() -> dict[str, Any]:
             "ignore_parameter_warnings": DEFAULT_IGNORE_PARAMETER_WARNINGS,
         },
         "matching": {
-            "outdir": "outputs/matched_fraction_features",
+            "outdir": DEFAULT_FILTERED_FEATURE_DIR,
             "mz_tol": 0.1,
             "rt_tol": 1.0,
+            "target_mz": "",
+            "target_mz_tolerance": 0.1,
         },
     }
 
@@ -773,10 +951,17 @@ def _normalize_legacy_config(config: dict[str, Any]) -> dict[str, Any]:
     complete = config.setdefault("complete", {})
     fraction = config.setdefault("fraction", {})
     mzmine = config.setdefault("mzmine", {})
+    matching = config.setdefault("matching", {})
     if _points_to_legacy_batch_template(complete.get("template_path"), "big_empty_template.mzbatch"):
         complete["template_path"] = "templates/big_empty_template.mzbatch"
     if _points_to_legacy_batch_template(fraction.get("template_path"), "fraction_empty_template.mzbatch"):
         fraction["template_path"] = "templates/fraction_empty_template.mzbatch"
+    if str(complete.get("feature_dir", "")).replace("\\", "/").endswith("outputs/complete_feature_table_csv"):
+        complete["feature_dir"] = DEFAULT_COMPLETE_FEATURE_DIR
+    if str(fraction.get("feature_dir", "")).replace("\\", "/").endswith("outputs/fraction_feature_tables_csv"):
+        fraction["feature_dir"] = DEFAULT_FRACTION_FEATURE_DIR
+    if str(matching.get("outdir", "")).replace("\\", "/").endswith("outputs/matched_fraction_features"):
+        matching["outdir"] = DEFAULT_FILTERED_FEATURE_DIR
     if not mzmine.get("temp_dir"):
         mzmine["temp_dir"] = "outputs/mzmine_temp"
     uses_bundled_templates = (
@@ -862,6 +1047,9 @@ def build_match_settings(config: dict[str, Any], *, base_dir: str | Path) -> Any
     complete_csv = Path(paths["complete_csv"])
     fraction_dir = Path(paths["fraction_dir"])
     outdir = resolve_path(base_dir, matching_cfg.get("outdir")) or Path(base_dir)
+    target_mz = parse_target_mz_values(matching_cfg.get("target_mz", ""))
+    target_mz_tolerance_value = str(matching_cfg.get("target_mz_tolerance", 0.1)).strip()
+    target_mz_tolerance = 0.1 if not target_mz_tolerance_value else float(target_mz_tolerance_value)
     return MatchSettings(
         fractions_dir=fraction_dir,
         big_csv=complete_csv,
@@ -869,6 +1057,8 @@ def build_match_settings(config: dict[str, Any], *, base_dir: str | Path) -> Any
         outdir=outdir,
         mz_tol=float(matching_cfg.get("mz_tol", DEFAULT_MZ_TOL)),
         rt_tol=float(matching_cfg.get("rt_tol", DEFAULT_RT_TOL)),
+        target_mz=target_mz,
+        target_mz_tolerance=target_mz_tolerance,
     )
 
 
@@ -927,6 +1117,18 @@ def build_mzmine_command(settings: MZmineSettings, batch_path: str | Path, *, dr
 
 def command_to_text(command: list[str]) -> str:
     return subprocess.list2cmdline(command)
+
+
+def count_mzmine_batch_steps(batch_path: str | Path) -> int:
+    """Return the number of top-level MZmine batch steps in an .mzbatch file."""
+    path = Path(batch_path).expanduser()
+    if not path.exists():
+        raise FileNotFoundError(f"MZmine batch file not found: {path}")
+    try:
+        root = ET.parse(path).getroot()
+    except ET.ParseError as exc:
+        raise RuntimeError(f"Failed to parse MZmine batch XML from '{path}': {exc}") from exc
+    return len(root.findall("batchstep"))
 
 
 def summarize_mzmine_failure(returncode: int, command_text: str, recent_lines: list[str]) -> str:
@@ -1083,7 +1285,7 @@ def run_pipeline(
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run the integrated MZmine batch and fraction-feature matching pipeline.")
+    parser = argparse.ArgumentParser(description="Run MZmine batch setup, MZmine execution, and/or fraction-feature filtering from one config.")
     parser.add_argument("--make-template-config", help="Write a template JSON config and exit.")
     parser.add_argument("--config", help="Run from a saved JSON config.")
     parser.add_argument("--stages", help="Comma-separated subset: prepare,run_complete,run_fraction,match.")

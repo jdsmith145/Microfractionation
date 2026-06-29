@@ -414,8 +414,8 @@
             <name_pattern>*peak_01</name_pattern>
         </parameter>
         <parameter name="Filename">
-            <current_file>OUTPUT_PLACEHOLDER.csv</current_file>
-            <last_file>OUTPUT_PLACEHOLDER.csv</last_file>
+            <current_file>placeholder.csv</current_file>
+            <last_file>placeholder.csv</last_file>
         </parameter>
         <parameter name="Field separator">,</parameter>
         <parameter name="Identification separator">;</parameter>

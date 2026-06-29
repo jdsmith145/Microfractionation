@@ -19,7 +19,9 @@ _SHARED_DIR = _THIS_DIR.parent
 if str(_SHARED_DIR) not in sys.path:
     sys.path.insert(0, str(_SHARED_DIR))
 
-from shared.gui_help_popover import HelpPopoverController
+from support.column_selector_dialog import choose_column
+from support.example_data_helper import open_example
+from support.gui_help_popover import HelpPopoverController
 
 try:
     import p_03_00_wikidata_core as core
@@ -102,15 +104,26 @@ def main() -> int:
     help_popovers = HelpPopoverController(root, ctk, colors, font_small)
 
     search_state = app_state.get("search", {}) or {}
+
+    def limit_display(value: Any, default: int) -> str:
+        normalized = core.normalize_query_limit(value, default)
+        return "No limit" if normalized is None else str(normalized)
+
     file_state = app_state.get("file_input", {}) or {}
     manual_state = app_state.get("manual_rows", []) or []
 
     var_status = tk.StringVar(value="Ready.")
     var_input_mode = tk.StringVar(value=str(app_state.get("input_mode", "file")))
-    var_search_name = tk.StringVar(value=str(search_state.get("search_name", "")))
+    var_search_name = tk.StringVar(value=str(search_state.get("output_label", search_state.get("search_name", ""))))
     var_output_dir = tk.StringVar(value=str(search_state.get("output_dir", str(_THIS_DIR / "output"))))
     var_merge = tk.BooleanVar(value=bool(search_state.get("merge_compounds", False)))
     var_merge_smiles = tk.BooleanVar(value=bool(search_state.get("merge_smiles", False)))
+    var_max_workers = tk.StringVar(value=str(search_state.get("max_workers", core.DEFAULT_MAX_WORKERS)))
+    limit_state = search_state.get("query_limits", {}) or {}
+    var_limit_taxon = tk.StringVar(value=limit_display(limit_state.get("taxon_lookup"), core.DEFAULT_TAXON_LOOKUP_LIMIT))
+    var_limit_exact = tk.StringVar(value=limit_display(limit_state.get("exact"), core.DEFAULT_EXACT_LIMIT))
+    var_limit_rank = tk.StringVar(value=limit_display(limit_state.get("rank"), core.DEFAULT_RANK_LIMIT))
+    var_limit_anywhere = tk.StringVar(value=limit_display(limit_state.get("anywhere"), core.DEFAULT_ANYWHERE_LIMIT))
     var_file_path = tk.StringVar(value=str(file_state.get("path", "")))
     var_sheet_name = tk.StringVar(value=str(file_state.get("sheet_name", "")))
     var_genus_col = tk.StringVar(value=str(file_state.get("genus_column", "genus")))
@@ -154,6 +167,17 @@ def main() -> int:
         hover = colors["success_hover"] if success else colors["danger_hover"] if danger else colors["accent_hover"] if primary else "#39414c"
         return ctk.CTkButton(parent, text=text, command=command, width=width or 112, height=38, corner_radius=10, fg_color=color, hover_color=hover)
 
+    def example_button(parent: Any, relative_path: str, *, width: int = 82) -> Any:
+        return make_button(parent, "Example", lambda: open_example(__file__, relative_path, messagebox=messagebox), width=width)
+
+    def select_loaded_column(var: tk.StringVar, title: str) -> None:
+        if not table_columns:
+            show_toast("Load the input table first.", kind="warning")
+            return
+        choice = choose_column(root, ctk, colors, table_columns, title=title, current=var.get())
+        if choice:
+            var.set(choice)
+
     def make_entry(parent: Any, var: tk.StringVar, placeholder: str = "") -> Any:
         return ctk.CTkEntry(parent, textvariable=var, placeholder_text=placeholder, fg_color=colors["entry"], border_color=colors["border"], text_color=colors["text"], height=36, corner_radius=8)
 
@@ -162,6 +186,26 @@ def main() -> int:
 
     def make_checkbox(parent: Any, text: str, variable: tk.BooleanVar) -> Any:
         return ctk.CTkCheckBox(parent, text=text, variable=variable, font=font_small, text_color=colors["text"], fg_color=colors["accent"], hover_color=colors["accent_hover"], border_color=colors["border"], checkbox_width=20, checkbox_height=20)
+
+    def parse_max_workers() -> int:
+        try:
+            return max(1, min(12, int(str(var_max_workers.get()).strip())))
+        except (TypeError, ValueError):
+            return core.DEFAULT_MAX_WORKERS
+
+    def parse_query_limits() -> dict[str, int | None]:
+        return {
+            "taxon_lookup": core.normalize_query_limit(var_limit_taxon.get(), core.DEFAULT_TAXON_LOOKUP_LIMIT),
+            "exact": core.normalize_query_limit(var_limit_exact.get(), core.DEFAULT_EXACT_LIMIT),
+            "rank": core.normalize_query_limit(var_limit_rank.get(), core.DEFAULT_RANK_LIMIT),
+            "anywhere": core.normalize_query_limit(var_limit_anywhere.get(), core.DEFAULT_ANYWHERE_LIMIT),
+        }
+
+    def set_limit_vars(limit_cfg: dict[str, Any]) -> None:
+        var_limit_taxon.set(limit_display(limit_cfg.get("taxon_lookup"), core.DEFAULT_TAXON_LOOKUP_LIMIT))
+        var_limit_exact.set(limit_display(limit_cfg.get("exact"), core.DEFAULT_EXACT_LIMIT))
+        var_limit_rank.set(limit_display(limit_cfg.get("rank"), core.DEFAULT_RANK_LIMIT))
+        var_limit_anywhere.set(limit_display(limit_cfg.get("anywhere"), core.DEFAULT_ANYWHERE_LIMIT))
 
     def labeled_widget(parent: Any, label: str, widget: Any, row: int, col: int, *, help_text: str, colspan: int = 1) -> None:
         label_frame = ctk.CTkFrame(parent, fg_color="transparent")
@@ -209,9 +253,12 @@ def main() -> int:
             "manual_rows": list(manual_rows),
             "search": {
                 "output_dir": var_output_dir.get().strip() or str(_THIS_DIR / "output"),
+                "output_label": var_search_name.get().strip(),
                 "search_name": var_search_name.get().strip(),
                 "merge_compounds": bool(var_merge.get()),
                 "merge_smiles": bool(var_merge_smiles.get()),
+                "max_workers": parse_max_workers(),
+                "query_limits": parse_query_limits(),
             },
             "visualization": {
                 "result_path": var_result_path.get().strip(),
@@ -321,11 +368,8 @@ def main() -> int:
         taxon_values = split_joined_values(first_nonempty(row, ["Taxon Name", "taxonName", "organism"]))
         scope = row_search_scope(row)
         if taxon_values:
-            first_taxon = taxon_values[0]
-            extra_count = len(taxon_values) - 1
-            if extra_count > 0:
-                return f"Found in taxon: {first_taxon} (+{extra_count} more)"
-            return f"Found in taxon: {first_taxon}"
+            label = "Found in taxon" if len(taxon_values) == 1 else "Found in taxa"
+            return f"{label}: {', '.join(taxon_values)}"
         if scope == "formula_exists_anywhere":
             return "Formula exists in Wikidata; no found-in-taxon statement was exported for this row."
         target = first_nonempty(row, ["Target Species", "Target Genus", "Target Family"])
@@ -681,6 +725,8 @@ def main() -> int:
             suffix = core.slugify_suffix(var_search_name.get())
             merge = bool(var_merge.get())
             merge_smiles = bool(var_merge_smiles.get())
+            max_workers = parse_max_workers()
+            query_limits = parse_query_limits()
         except Exception as exc:
             messagebox.showerror("Cannot start", str(exc))
             return
@@ -689,6 +735,7 @@ def main() -> int:
         append_log("New Wikidata run started.")
         append_log(f"Input rows: {len(data)}")
         append_log(f"Output folder: {outdir}")
+        append_log(f"Parallel searches: {max_workers}")
         worker_state["running"] = True
         run_button.configure(state="disabled")
         progress.start()
@@ -699,7 +746,7 @@ def main() -> int:
 
         def worker() -> None:
             try:
-                result_queue.put((True, core.run_search(data, str(outdir), search_suffix=suffix, log_callback=log_callback, merge_compounds=merge, merge_smiles=merge_smiles)))
+                result_queue.put((True, core.run_search(data, str(outdir), search_suffix=suffix, log_callback=log_callback, merge_compounds=merge, merge_smiles=merge_smiles, max_workers=max_workers, query_limits=query_limits)))
             except Exception as exc:
                 result_queue.put((False, (exc, traceback.format_exc())))
 
@@ -758,9 +805,11 @@ def main() -> int:
         var_species_col.set(str(file_cfg.get("species_column", "species")))
         var_formula_col.set(str(file_cfg.get("formula_column", "formula")))
         var_output_dir.set(str(search_cfg.get("output_dir", str(_THIS_DIR / "output"))))
-        var_search_name.set(str(search_cfg.get("search_name", "")))
+        var_search_name.set(str(search_cfg.get("output_label", search_cfg.get("search_name", ""))))
         var_merge.set(bool(search_cfg.get("merge_compounds", False)))
         var_merge_smiles.set(bool(search_cfg.get("merge_smiles", False)))
+        var_max_workers.set(str(search_cfg.get("max_workers", core.DEFAULT_MAX_WORKERS)))
+        set_limit_vars(search_cfg.get("query_limits", {}) or {})
         viz_cfg = config.get("visualization", {}) or {}
         var_result_path.set(str(viz_cfg.get("result_path", "")))
         var_result_page_size.set(str(viz_cfg.get("page_size", var_result_page_size.get())))
@@ -827,7 +876,7 @@ def main() -> int:
     txt_log.configure(state="disabled")
 
     card = make_card(workflow_scroll, "Search settings")
-    labeled_widget(card, "Search name", make_entry(card, var_search_name, "e.g. s19_hookerianum"), 0, 0, help_text="Optional suffix added to output file names. Use a short sample or project label so repeated runs do not overwrite each other.")
+    labeled_widget(card, "Output file label", make_entry(card, var_search_name, "e.g. s19_hookerianum"), 0, 0, help_text="Optional label added to output file names. This is not the search term; it is only a short sample or project label used in output file names so repeated runs do not overwrite each other.")
     out_frame = ctk.CTkFrame(card, fg_color="transparent")
     out_frame.grid(row=1, column=1, sticky="ew", padx=(0, 18), pady=8)
     out_frame.grid_columnconfigure(0, weight=1)
@@ -846,6 +895,36 @@ def main() -> int:
     make_help(merge_frame, "Use this when Wikidata returns the same compound page more than once, usually because multiple taxon statements point to the same molecule. The exported row keeps one compound URL and joins the unique names, taxa, and annotations from the duplicate rows.").grid(row=0, column=1, sticky="w", padx=(0, 22), pady=(0, 8))
     make_checkbox(merge_frame, "Merge same canonical SMILES", var_merge_smiles).grid(row=0, column=3, sticky="w", padx=(0, 8), pady=(0, 8))
     make_help(merge_frame, "Use this when different Wikidata compound pages describe the same molecular structure. Rows are grouped only when canonical SMILES is present; compound names, compound URLs, taxon names, and taxon URLs are joined into the same exported row. Blank-SMILES rows are left separate.").grid(row=0, column=4, sticky="w", pady=(0, 8))
+    labeled_widget(card, "Parallel searches", make_combo(card, var_max_workers, ["1", "2", "4", "6", "8"]), 3, 0, help_text="Number of input rows searched at the same time. The default 4 is a good balance for typical runs. Use 1 or 2 if Wikidata starts throttling or your network is unstable; use 6 or 8 only for larger input tables when retry messages are rare.")
+
+    limit_options = ["1", "5", "20", "50", "100", "300", "500", "1200", "3000", "No limit"]
+    advanced_toggle_row = ctk.CTkFrame(card, fg_color="transparent")
+    advanced_toggle_row.grid(row=4, column=0, columnspan=6, sticky="ew", pady=(8, 0))
+    advanced_limits = ctk.CTkFrame(card, fg_color=colors["card_alt"], corner_radius=12)
+    advanced_limits.grid(row=5, column=0, columnspan=6, sticky="ew", pady=(8, 0))
+    for col in range(6):
+        advanced_limits.grid_columnconfigure(col, weight=1 if col % 2 == 1 else 0)
+    advanced_note = (
+        "These settings cap how many rows Wikidata may return for each query type. "
+        "Use No limit only for focused formulas; broad formulas can become slow or time out."
+    )
+    ctk.CTkLabel(advanced_limits, text=advanced_note, font=font_small, text_color=colors["muted"], justify="left", wraplength=720).grid(row=0, column=0, columnspan=6, sticky="ew", padx=12, pady=(12, 4))
+    labeled_widget(advanced_limits, "Taxon lookup limit", make_combo(advanced_limits, var_limit_taxon, limit_options), 1, 0, help_text="Maximum rows used when resolving genus and family names to Wikidata taxon identifiers. The default is 5 because the script only needs the best matching taxon page.")
+    labeled_widget(advanced_limits, "Exact species search limit", make_combo(advanced_limits, var_limit_exact, limit_options), 2, 0, help_text="Maximum compound rows returned for the exact species plus formula search. Default: 500. Choose No limit only if you expect many valid species-level hits.")
+    labeled_widget(advanced_limits, "Genus/family search limit", make_combo(advanced_limits, var_limit_rank, limit_options), 3, 0, help_text="Maximum compound rows returned for each genus-level and family-level formula search. Default: 1200, because broader taxonomic searches can return many rows.")
+    labeled_widget(advanced_limits, "Formula-anywhere limit", make_combo(advanced_limits, var_limit_anywhere, limit_options), 4, 0, help_text="Maximum compound rows returned when the formula is searched anywhere in Wikidata, without restricting the taxon. Default: 300. No limit may be slow for common formulas.")
+    advanced_limits.grid_remove()
+
+    def toggle_advanced_limits() -> None:
+        if advanced_limits.winfo_ismapped():
+            advanced_limits.grid_remove()
+            advanced_button.configure(text="Show advanced query limits")
+        else:
+            advanced_limits.grid()
+            advanced_button.configure(text="Hide advanced query limits")
+
+    advanced_button = make_button(advanced_toggle_row, "Show advanced query limits", toggle_advanced_limits, width=190)
+    advanced_button.pack(anchor="w")
 
     card = make_card(workflow_scroll, "Input source")
     mode_frame = ctk.CTkFrame(card, fg_color="transparent")
@@ -862,29 +941,77 @@ def main() -> int:
     manual_panel = ctk.CTkFrame(panel_host, fg_color="transparent")
     manual_panel.grid_columnconfigure(1, weight=1)
 
-    label = ctk.CTkFrame(file_panel, fg_color="transparent")
-    label.grid(row=0, column=0, sticky="ew", padx=(0, 10), pady=8)
-    label.grid_columnconfigure(0, weight=1)
-    ctk.CTkLabel(label, text="Input table", font=font_label, text_color=colors["muted"], anchor="w").grid(row=0, column=0, sticky="w")
-    make_help(label, "CSV or Excel table. Each usable row should contain a plant genus, a molecular formula, and optionally a species. If species is blank, exact-species matching is skipped but genus, family, and formula-anywhere searches still run.").grid(row=0, column=1, sticky="e", padx=(6, 0))
+    file_panel.grid_columnconfigure(0, weight=0)
+    file_panel.grid_columnconfigure(1, weight=1)
+
+    def file_row_label(row: int, text: str, help_text: str) -> None:
+        label = ctk.CTkFrame(file_panel, fg_color="transparent")
+        label.grid(row=row, column=0, sticky="ew", padx=(0, 10), pady=8)
+        label.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(label, text=text, font=font_label, text_color=colors["muted"], anchor="w").grid(row=0, column=0, sticky="w")
+        make_help(label, help_text).grid(row=0, column=1, sticky="e", padx=(6, 0))
+
+    file_row_label(
+        0,
+        "Input table",
+        "CSV or Excel table. Each usable row should contain a plant genus, a molecular formula, and optionally a species. If species is blank, exact-species matching is skipped but genus, family, and formula-anywhere searches still run.",
+    )
     file_picker = ctk.CTkFrame(file_panel, fg_color="transparent")
-    file_picker.grid(row=0, column=1, columnspan=3, sticky="ew", pady=8)
+    file_picker.grid(row=0, column=1, sticky="ew", pady=8)
     file_picker.grid_columnconfigure(0, weight=1)
     make_entry(file_picker, var_file_path).grid(row=0, column=0, sticky="ew", padx=(0, 8))
     make_button(file_picker, "Browse", browse_input_file, width=82).grid(row=0, column=1, padx=(0, 8))
-    make_button(file_picker, "Load", load_preview_file, primary=True, width=72).grid(row=0, column=2)
-    labeled_widget(file_panel, "Excel sheet", make_combo(file_panel, var_sheet_name, [""]), 1, 0, help_text="For Excel files, choose the worksheet that contains the genus/species/formula table. CSV files ignore this field.")
-    sheet_combo = file_panel.grid_slaves(row=1, column=1)[0]
+    make_button(file_picker, "Load", load_preview_file, primary=True, width=72).grid(row=0, column=2, padx=(0, 8))
+    example_button(file_picker, "example_data/wikidata/wikidata_formula_queries.xlsx").grid(row=0, column=3)
+
+    file_row_label(
+        1,
+        "Excel sheet",
+        "For Excel files, choose the worksheet that contains the genus/species/formula table. CSV files ignore this field.",
+    )
+    sheet_combo = make_combo(file_panel, var_sheet_name, [""])
+    sheet_combo.grid(row=1, column=1, sticky="ew", pady=8)
     sheet_combo.configure(command=lambda _choice: load_preview_file() if var_file_path.get().strip() else None)
-    labeled_widget(file_panel, "Genus column", make_combo(file_panel, var_genus_col, ["genus"]), 2, 0, help_text="Column containing the plant genus, for example Hypericum. This column is required because the script uses it to resolve the taxonomic scope.")
-    combo_genus = file_panel.grid_slaves(row=2, column=1)[0]
-    labeled_widget(file_panel, "Species column", make_combo(file_panel, var_species_col, ["species"]), 2, 2, help_text="Optional species column. Values may be only the epithet, such as olympicum, or the full name; the script normalizes it against the genus.")
-    combo_species = file_panel.grid_slaves(row=2, column=3)[0]
-    labeled_widget(file_panel, "Formula column", make_combo(file_panel, var_formula_col, ["formula"]), 3, 0, help_text="Column containing molecular formulas such as C18H16O7. Spaces are removed automatically before searching Wikidata.")
-    combo_formula = file_panel.grid_slaves(row=3, column=1)[0]
-    ctk.CTkLabel(file_panel, textvariable=var_preview_summary, font=font_small, text_color=colors["muted"], anchor="w", justify="left", wraplength=760).grid(row=4, column=0, columnspan=4, sticky="ew", pady=(8, 4))
+
+    file_row_label(
+        2,
+        "Genus column",
+        "Column containing the plant genus, for example Hypericum. This column is required because the script uses it to resolve the taxonomic scope.",
+    )
+    genus_row = ctk.CTkFrame(file_panel, fg_color="transparent")
+    genus_row.grid(row=2, column=1, sticky="ew", pady=8)
+    genus_row.grid_columnconfigure(0, weight=1)
+    combo_genus = make_combo(genus_row, var_genus_col, ["genus"])
+    combo_genus.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+    make_button(genus_row, "Select", lambda: select_loaded_column(var_genus_col, "Select genus column"), width=74).grid(row=0, column=1)
+
+    file_row_label(
+        3,
+        "Species column",
+        "Optional species column. Values may be only the epithet, such as olympicum, or the full name; the script normalizes it against the genus.",
+    )
+    species_row = ctk.CTkFrame(file_panel, fg_color="transparent")
+    species_row.grid(row=3, column=1, sticky="ew", pady=8)
+    species_row.grid_columnconfigure(0, weight=1)
+    combo_species = make_combo(species_row, var_species_col, ["species"])
+    combo_species.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+    make_button(species_row, "Select", lambda: select_loaded_column(var_species_col, "Select species column"), width=74).grid(row=0, column=1)
+
+    file_row_label(
+        4,
+        "Formula column",
+        "Column containing molecular formulas such as C18H16O7. Spaces are removed automatically before searching Wikidata.",
+    )
+    formula_row = ctk.CTkFrame(file_panel, fg_color="transparent")
+    formula_row.grid(row=4, column=1, sticky="ew", pady=8)
+    formula_row.grid_columnconfigure(0, weight=1)
+    combo_formula = make_combo(formula_row, var_formula_col, ["formula"])
+    combo_formula.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+    make_button(formula_row, "Select", lambda: select_loaded_column(var_formula_col, "Select formula column"), width=74).grid(row=0, column=1)
+
+    ctk.CTkLabel(file_panel, textvariable=var_preview_summary, font=font_small, text_color=colors["muted"], anchor="w", justify="left", wraplength=760).grid(row=5, column=0, columnspan=2, sticky="ew", pady=(8, 4))
     txt_preview = ctk.CTkTextbox(file_panel, height=160, fg_color=colors["entry"], border_color=colors["border"], border_width=1, text_color=colors["text"], font=font_mono, corner_radius=10, wrap="none")
-    txt_preview.grid(row=5, column=0, columnspan=4, sticky="ew")
+    txt_preview.grid(row=6, column=0, columnspan=2, sticky="ew")
     txt_preview.insert("end", "Load a table to preview the first rows.")
     txt_preview.configure(state="disabled")
 

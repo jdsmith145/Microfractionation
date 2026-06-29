@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import queue
 import sys
 import threading
@@ -22,7 +23,9 @@ _SHARED_DIR = _THIS_DIR.parent
 if str(_SHARED_DIR) not in sys.path:
     sys.path.insert(0, str(_SHARED_DIR))
 
-from shared.gui_help_popover import HelpPopoverController
+from support.column_selector_dialog import choose_column, choose_columns
+from support.example_data_helper import open_example
+from support.gui_help_popover import HelpPopoverController
 
 try:
     import p_02_00_two_sided_plot_core as core
@@ -96,6 +99,51 @@ def main() -> int:
         except Exception:
             pass
 
+    project_config_path_text = os.environ.get("MICROFRACTIONATION_PROJECT_CONFIG", "")
+    project_config_path = Path(project_config_path_text).expanduser() if project_config_path_text else None
+    project_config = load_json_safe(project_config_path) if project_config_path and project_config_path.exists() else {}
+    project_base = project_config_path.parent.parent if project_config_path else _THIS_DIR.parent.parent
+    project_samples: list[dict[str, Any]] = [item for item in project_config.get("samples", []) if isinstance(item, dict)]
+
+    def resolve_project_path(value: str | Path | None) -> Path:
+        if value is None:
+            return project_base
+        path = Path(str(value)).expanduser()
+        return path if path.is_absolute() else project_base / path
+
+    def sample_label(sample: dict[str, Any]) -> str:
+        return str(sample.get("display_name") or sample.get("slug") or "sample")
+
+    def sample_slug(sample: dict[str, Any]) -> str:
+        return core.slugify(str(sample.get("slug") or sample.get("display_name") or "sample"))
+
+    def first_existing(paths: list[str] | tuple[str, ...]) -> str:
+        for path_text in paths:
+            path = resolve_project_path(path_text)
+            if path.exists():
+                return str(path)
+        return str(resolve_project_path(paths[0])) if paths else ""
+
+    def project_sample_by_label(label: str) -> dict[str, Any] | None:
+        return next((sample for sample in project_samples if sample_label(sample) == label), None)
+
+    def sample_filtered_table(sample: dict[str, Any]) -> Path:
+        slug = sample_slug(sample)
+        output_folder = str(sample.get("output_folder") or f"output/01_mzmine_pipeline/{slug}")
+        return resolve_project_path(output_folder) / "filtered_feature_table" / f"{slug}_filtered_feature_table.csv"
+
+    def sample_two_sided_output_dir(sample: dict[str, Any]) -> Path:
+        module_folder = project_config.get("modules", {}).get("two_sided_plot", {}).get("output_folder")
+        root = resolve_project_path(module_folder or "output/02_two_sided_plot")
+        return root / sample_slug(sample)
+
+    def sample_activity_dir(sample: dict[str, Any]) -> Path:
+        configured = str(sample.get("activity_subfolder") or "")
+        if configured:
+            return resolve_project_path(configured)
+        root = project_config.get("shared_inputs", {}).get("activity_root", "")
+        return resolve_project_path(root) if root else _THIS_DIR
+
     def split_csv(text: str) -> list[str]:
         return [piece.strip() for piece in text.split(",") if piece.strip()]
 
@@ -107,7 +155,7 @@ def main() -> int:
         return [piece.strip().strip('"') for piece in normalized.split(";") if piece.strip().strip('"')]
 
     plate_scale_labels = {
-        "Raw fluorescence (no scaling)": "none",
+        "Raw intensity (no scaling)": "none",
         "Percent of positive control": "positive_control_pct",
         "Relative range within each plate (0-100)": "positive_control_then_minmax_0_100",
     }
@@ -119,9 +167,9 @@ def main() -> int:
     automatic_activity_labels = {
         "",
         "Activity",
-        "Bioactivity",
+        "Activity",
         "Normalized activity (%)",
-        "Normalized bioactivity (%)",
+        "Normalized activity (%)",
     }
 
     def plate_scale_label(value: str) -> str:
@@ -148,10 +196,10 @@ def main() -> int:
         if input_type == "Plate reader":
             scale_code = plate_scale_code(var_plate_scale_mode.get().strip())
             if scale_code == "positive_control_pct":
-                return "Fluorescence (% of positive control)"
+                return "Intensity (% of positive control)"
             if scale_code in {"positive_control_then_minmax_0_100", "minmax_0_100", "control_then_minmax_0_100"}:
-                return "Normalized fluorescence (0-100)"
-            return "Raw fluorescence"
+                return "Normalized intensity (0-100)"
+            return "Raw intensity"
         if var_control_source.get() != "No control":
             return "Signal relative to control"
         return "Signal value"
@@ -178,6 +226,15 @@ def main() -> int:
     # Variables
     # ---------------------------
     var_status = tk.StringVar(value="Ready.")
+    project_sample_names = [sample_label(sample) for sample in project_samples]
+    sample_prompt = "Select a sample..."
+    var_project_sample = tk.StringVar(value=sample_prompt)
+    var_project_summary = tk.StringVar(value="No launcher project config detected. Use manual paths below.")
+    workflow_sections_visible = tk.BooleanVar(value=not bool(project_samples))
+    var_show_inherited_settings = tk.BooleanVar(value=False)
+    var_show_export_options = tk.BooleanVar(value=bool(app_state.get("ui_state", {}).get("show_export_options", False)))
+    var_show_table_advanced = tk.BooleanVar(value=bool(app_state.get("ui_state", {}).get("show_table_advanced", False)))
+    var_show_excel_sheet = tk.BooleanVar(value=bool(app_state.get("ui_state", {}).get("show_excel_sheet", False)))
     var_sample_name = tk.StringVar(value=str(app_state.get("sample_name", "")))
     var_mzml = tk.StringVar(value=str(app_state.get("chrom_mzml", "")))
     var_filtered = tk.StringVar(value=str(app_state.get("filtered_csv", "")))
@@ -188,13 +245,13 @@ def main() -> int:
     var_n_fractions = tk.StringVar(value=str(app_state.get("fraction_windows", {}).get("n_fractions", 96)))
 
     activity_state = app_state.get("activity_table", {}) or {}
-    var_activity_input_type = tk.StringVar(value="Plate reader" if str(activity_state.get("input_type", "table")).lower() == "plate_reader" else "Table")
+    var_activity_input_type = tk.StringVar(value="Plate reader")
     var_activity_path = tk.StringVar(value=str(activity_state.get("path", "")))
     var_sheet_name = tk.StringVar(value=str(activity_state.get("sheet_name", "")))
     var_fraction_column = tk.StringVar(value=str(activity_state.get("fraction_column", "fraction")))
     var_start_column = tk.StringVar(value=str(activity_state.get("start_column", "")))
     var_end_column = tk.StringVar(value=str(activity_state.get("end_column", "")))
-    var_value_column = tk.StringVar(value=str(activity_state.get("value_column", "average")))
+    var_value_column = tk.StringVar(value=str(activity_state.get("value_column", "")))
     var_replicate_columns = tk.StringVar(value=join_csv(activity_state.get("replicate_columns", [])))
     def initial_control_source(state: dict[str, Any]) -> str:
         if state.get("control_scalar_column"):
@@ -297,8 +354,8 @@ def main() -> int:
             corner_radius=8,
         )
 
-    def make_checkbox(parent: Any, text: str, variable: tk.BooleanVar) -> Any:
-        return ctk.CTkCheckBox(parent, text=text, variable=variable, font=font_small, text_color=colors["text"], fg_color=colors["accent"], hover_color=colors["accent_hover"], border_color=colors["border"], checkbox_width=20, checkbox_height=20)
+    def make_checkbox(parent: Any, text: str, variable: tk.BooleanVar, command: Any | None = None) -> Any:
+        return ctk.CTkCheckBox(parent, text=text, variable=variable, command=command, font=font_small, text_color=colors["text"], fg_color=colors["accent"], hover_color=colors["accent_hover"], border_color=colors["border"], checkbox_width=20, checkbox_height=20)
 
     def labeled_widget(parent: Any, label: str, widget: Any, row: int, col: int, *, help_text: str, colspan: int = 1, padx_right: int = 18) -> None:
         label_frame = ctk.CTkFrame(parent, fg_color="transparent")
@@ -308,16 +365,49 @@ def main() -> int:
         make_help(label_frame, help_text).grid(row=0, column=1, sticky="e", padx=(6, 0))
         widget.grid(row=row, column=col + 1, columnspan=colspan, sticky="ew", padx=(0, padx_right), pady=8)
 
-    def file_row(parent: Any, row: int, label: str, var: tk.StringVar, browse_cmd: Callable[[], None], help_text: str, *, load_cmd: Callable[[], None] | None = None) -> None:
+    def example_button(parent: Any, relative_path: str, *, width: int = 82) -> Any:
+        return make_button(parent, "Example", lambda: open_example(__file__, relative_path, messagebox=messagebox), width=width)
+
+    def select_activity_column(var: tk.StringVar, title: str) -> None:
+        if not activity_columns:
+            show_toast("Load the activity table first.", kind="warning")
+            return
+        choice = choose_column(root, ctk, colors, activity_columns, title=title, current=var.get())
+        if choice:
+            var.set(choice)
+            save_state()
+
+    def select_activity_columns(var: tk.StringVar, title: str) -> None:
+        if not activity_columns:
+            show_toast("Load the activity table first.", kind="warning")
+            return
+        selected = choose_columns(root, ctk, colors, activity_columns, title=title, current=split_csv(var.get()), multiple=True)
+        if selected is not None:
+            var.set(join_csv(selected))
+            save_state()
+
+    def file_row(
+        parent: Any,
+        row: int,
+        label: str,
+        var: tk.StringVar,
+        browse_cmd: Callable[[], None],
+        help_text: str,
+        *,
+        load_cmd: Callable[[], None] | None = None,
+        example_path: str | None = None,
+    ) -> None:
         label_frame = ctk.CTkFrame(parent, fg_color="transparent")
         label_frame.grid(row=row, column=0, sticky="ew", padx=(0, 10), pady=8)
         label_frame.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(label_frame, text=label, font=font_label, text_color=colors["muted"], anchor="w").grid(row=0, column=0, sticky="w")
         make_help(label_frame, help_text).grid(row=0, column=1, sticky="e", padx=(6, 0))
-        make_entry(parent, var).grid(row=row, column=1, columnspan=3 if load_cmd else 4, sticky="ew", padx=(0, 10), pady=8)
-        make_button(parent, "Browse", browse_cmd, width=88).grid(row=row, column=4 if load_cmd else 5, sticky="ew", padx=(0, 10) if load_cmd else 0, pady=8)
+        make_entry(parent, var).grid(row=row, column=1, columnspan=2 if example_path else 3 if load_cmd else 4, sticky="ew", padx=(0, 10), pady=8)
+        make_button(parent, "Browse", browse_cmd, width=88).grid(row=row, column=3 if example_path else 4 if load_cmd else 5, sticky="ew", padx=(0, 10) if (load_cmd or example_path) else 0, pady=8)
         if load_cmd:
-            make_button(parent, "Load", load_cmd, primary=True, width=78).grid(row=row, column=5, sticky="ew", pady=8)
+            make_button(parent, "Load", load_cmd, primary=True, width=78).grid(row=row, column=4 if example_path else 5, sticky="ew", padx=(0, 10) if example_path else 0, pady=8)
+        if example_path:
+            example_button(parent, example_path).grid(row=row, column=5 if load_cmd else 4, sticky="ew", pady=8)
 
     def make_card(parent: Any, title: str) -> Any:
         card = ctk.CTkFrame(parent, fg_color=colors["card"], border_color=colors["border"], border_width=1, corner_radius=16)
@@ -380,19 +470,34 @@ def main() -> int:
         if notify:
             mark_log_unread()
 
-    def browse_file(var: tk.StringVar, title: str, patterns: list[tuple[str, str]]) -> None:
-        path = filedialog.askopenfilename(title=title, initialdir=str(_THIS_DIR), filetypes=patterns)
+    def dialog_initial_dir(var: tk.StringVar | None = None, fallback: Path | None = None) -> str:
+        if var is not None and var.get().strip():
+            path = Path(var.get().strip()).expanduser()
+            if path.exists():
+                return str(path.parent if path.is_file() else path)
+            if path.parent.exists():
+                return str(path.parent)
+        if fallback and fallback.exists():
+            return str(fallback)
+        return str(_THIS_DIR)
+
+    def current_project_sample() -> dict[str, Any] | None:
+        return project_sample_by_label(var_project_sample.get().strip())
+
+    def browse_file(var: tk.StringVar, title: str, patterns: list[tuple[str, str]], *, initial_dir: Path | None = None) -> None:
+        path = filedialog.askopenfilename(title=title, initialdir=dialog_initial_dir(var, initial_dir), filetypes=patterns)
         if path:
             var.set(path)
 
     def browse_plate_files() -> None:
-        paths = filedialog.askopenfilenames(title="Choose replicate plate-reader files", initialdir=str(_THIS_DIR), filetypes=table_patterns)
+        sample = current_project_sample()
+        paths = filedialog.askopenfilenames(title="Choose replicate plate-reader files", initialdir=dialog_initial_dir(fallback=sample_activity_dir(sample) if sample else None), filetypes=table_patterns)
         if paths:
             var_plate_files.set("; ".join(paths))
             save_state()
 
     def browse_dir(var: tk.StringVar, title: str) -> None:
-        path = filedialog.askdirectory(title=title, initialdir=str(_THIS_DIR))
+        path = filedialog.askdirectory(title=title, initialdir=dialog_initial_dir(var))
         if path:
             var.set(path)
 
@@ -436,7 +541,7 @@ def main() -> int:
                 "input_type": "table",
                 "path": var_activity_path.get().strip(),
                 "sheet_name": var_sheet_name.get().strip(),
-                "fraction_column": var_fraction_column.get().strip(),
+                "fraction_column": "",
                 "start_column": var_start_column.get().strip(),
                 "end_column": var_end_column.get().strip(),
                 "value_column": var_value_column.get().strip(),
@@ -454,6 +559,7 @@ def main() -> int:
                 "label": var_activity_label.get().strip(),
             }
         return {
+            "project_sample": var_project_sample.get().strip(),
             "sample_name": var_sample_name.get().strip(),
             "chrom_mzml": var_mzml.get().strip(),
             "filtered_csv": var_filtered.get().strip(),
@@ -483,6 +589,12 @@ def main() -> int:
                     "figsize": [parse_float("figure width", var_width.get()) or 14.0, parse_float("figure height", var_height.get()) or 8.0],
                 },
             },
+            "ui_state": {
+                "show_inherited_settings": bool(var_show_inherited_settings.get()),
+                "show_export_options": bool(var_show_export_options.get()),
+                "show_table_advanced": bool(var_show_table_advanced.get()),
+                "show_excel_sheet": bool(var_show_excel_sheet.get()),
+            },
         }
 
     def save_state() -> None:
@@ -498,12 +610,55 @@ def main() -> int:
         var_output_preview.set(str(outdir / f"{base}{suffix}.svg"))
         save_state()
 
+    def inherited_fraction_defaults() -> dict[str, Any]:
+        return (
+            project_config.get("fraction_windows")
+            or project_config.get("fraction")
+            or project_config.get("mzmine", {}).get("fraction")
+            or {}
+        )
+
+    def apply_project_sample_to_form(*_args: Any, notify: bool = True) -> None:
+        sample = current_project_sample()
+        if sample is None:
+            var_project_summary.set("Select a launcher sample first, or open project file fields and enter paths directly.")
+            return
+        reveal_workflow_sections(reset_activity=True)
+        label = sample_label(sample)
+        slug = sample_slug(sample)
+        var_sample_name.set(label)
+        preferred_mzml = sample.get("plot_mzml_file") or sample.get("representative_mzml_file")
+        var_mzml.set(str(resolve_project_path(preferred_mzml)) if str(preferred_mzml or "").strip() else first_existing(sample.get("sample_mzml_files", []) or []))
+        var_filtered.set(str(sample_filtered_table(sample)))
+        var_outdir.set(str(sample_two_sided_output_dir(sample)))
+        fraction_defaults = inherited_fraction_defaults()
+        if fraction_defaults:
+            var_rt_start.set(str(fraction_defaults.get("rt_start", var_rt_start.get() or 2.0)))
+            var_fraction_width.set(str(fraction_defaults.get("fraction_width", fraction_defaults.get("width", var_fraction_width.get() or 0.375))))
+            if fraction_defaults.get("n_fractions"):
+                var_n_fractions.set(str(fraction_defaults.get("n_fractions")))
+        activity_dir = sample_activity_dir(sample)
+        mzml_count = len(sample.get("sample_mzml_files", []) or [])
+        summary_lines = [
+            f"Project sample: {label}",
+            f"mzML choices: {mzml_count} sample file(s); selected chromatogram can be changed below.",
+            f"Filtered table: {var_filtered.get()}",
+            f"Activity folder: {activity_dir}",
+            f"Output folder: {var_outdir.get()}",
+            f"Fraction windows: start {var_rt_start.get()} min, width {var_fraction_width.get()} min, count {var_n_fractions.get()}",
+        ]
+        var_project_summary.set("\n".join(summary_lines))
+        update_output_preview()
+        save_state()
+        if notify:
+            show_toast(f"Loaded sample: {label}", kind="success")
+
     def available_columns() -> list[str]:
         return ["", *activity_columns]
 
     def refresh_column_controls() -> None:
         values = available_columns()
-        for combo in [combo_fraction, combo_start, combo_end, combo_value, combo_control_column, combo_control_scalar]:
+        for combo in [combo_start, combo_end, combo_value, combo_control_column, combo_control_scalar]:
             combo.configure(values=values)
 
     def render_activity_preview(df: pd.DataFrame) -> None:
@@ -532,9 +687,12 @@ def main() -> int:
                 sheet_combo.configure(values=sheets)
                 if var_sheet_name.get().strip() not in sheets:
                     var_sheet_name.set(sheets[0])
+                var_show_excel_sheet.set(True)
             else:
                 sheet_combo.configure(values=[""])
                 var_sheet_name.set("")
+                var_show_excel_sheet.set(False)
+            update_excel_sheet_visibility()
             activity_df = core.read_table(path, sheet_name=var_sheet_name.get().strip() or None)
             activity_columns = [str(column) for column in activity_df.columns]
             refresh_column_controls()
@@ -555,6 +713,7 @@ def main() -> int:
             show_toast("Select one or more columns first.", kind="warning")
             return
         var_replicate_columns.set(join_csv(selected))
+        var_value_column.set("")
         append_log(f"Selected replicate columns: {join_csv(selected)}")
         show_toast("Replicate columns applied.", kind="success")
 
@@ -587,7 +746,7 @@ def main() -> int:
         return core.ActivityTableSettings(
             path=path,
             sheet_name=var_sheet_name.get().strip() or None,
-            fraction_column=var_fraction_column.get().strip() or None,
+            fraction_column=None,
             start_column=var_start_column.get().strip() or None,
             end_column=var_end_column.get().strip() or None,
             value_column=var_value_column.get().strip() or None,
@@ -696,6 +855,10 @@ def main() -> int:
         figure_summary.configure(state="disabled")
 
     def run_plot(*, export: bool) -> None:
+        if project_samples and not workflow_sections_visible.get():
+            var_project_summary.set("Select a launcher sample first, or open project file fields and enter paths directly.")
+            show_toast("Select a sample first.", kind="warning")
+            return
         try:
             cfg = validate_common_inputs()
         except Exception as exc:
@@ -786,6 +949,7 @@ def main() -> int:
             append_log(f"Saved config: {path}")
 
     def apply_config(config: dict[str, Any]) -> None:
+        var_project_sample.set(str(config.get("project_sample", var_project_sample.get())))
         var_sample_name.set(str(config.get("sample_name", "")))
         var_mzml.set(str(config.get("chrom_mzml", "")))
         var_filtered.set(str(config.get("filtered_csv", "")))
@@ -798,10 +962,10 @@ def main() -> int:
         var_activity_input_type.set("Plate reader" if str(activity.get("input_type", "table")).lower() == "plate_reader" else "Table")
         var_activity_path.set(str(activity.get("path", "")))
         var_sheet_name.set(str(activity.get("sheet_name", "")))
-        var_fraction_column.set(str(activity.get("fraction_column", "fraction")))
+        var_fraction_column.set(str(activity.get("fraction_column", "")))
         var_start_column.set(str(activity.get("start_column", "")))
         var_end_column.set(str(activity.get("end_column", "")))
-        var_value_column.set(str(activity.get("value_column", "average")))
+        var_value_column.set(str(activity.get("value_column", "")))
         var_replicate_columns.set(join_csv(activity.get("replicate_columns", [])))
         var_control_source.set(initial_control_source(activity))
         var_control_rows.set(join_csv([str(value) for value in activity.get("control_row_indices", [])]))
@@ -837,7 +1001,16 @@ def main() -> int:
         figsize = style.get("figsize") or [14.0, 8.0]
         var_width.set(str(figsize[0]))
         var_height.set(str(figsize[1]))
+        ui_state = config.get("ui_state", {}) or {}
+        var_show_inherited_settings.set(bool(ui_state.get("show_inherited_settings", var_show_inherited_settings.get())))
+        var_show_export_options.set(bool(ui_state.get("show_export_options", var_show_export_options.get())))
+        var_show_table_advanced.set(bool(ui_state.get("show_table_advanced", var_show_table_advanced.get())))
+        var_show_excel_sheet.set(bool(ui_state.get("show_excel_sheet", var_show_excel_sheet.get())))
         update_output_preview()
+        apply_project_sample_to_form(notify=False) if config.get("project_sample") and project_sample_by_label(str(config.get("project_sample"))) else None
+        update_inherited_visibility()
+        update_export_visibility()
+        update_table_advanced_visibility()
         update_control_source_visibility()
         update_activity_input_visibility()
 
@@ -904,7 +1077,7 @@ def main() -> int:
             unread_log_events["count"] = 0
             update_log_badge()
 
-    for name, width in [("Workflow", 150), ("Activity data", 170), ("Figures", 140), ("Log", 120)]:
+    for name, width in [("Workflow", 150), ("Figures", 140), ("Log", 120)]:
         holder = ctk.CTkFrame(tab_bar, fg_color="transparent")
         holder.pack(side="left", padx=(0, 8))
         button = make_button(holder, name, lambda tab=name: set_active_tab(tab), width=width)
@@ -920,41 +1093,141 @@ def main() -> int:
 
     workflow_scroll = ctk.CTkScrollableFrame(tab_frames["Workflow"], fg_color="transparent")
     workflow_scroll.pack(fill="both", expand=True, padx=8, pady=8)
-    card = make_card(workflow_scroll, "Inputs")
-    file_row(card, 0, "Sample chromatogram mzML", var_mzml, lambda: browse_file(var_mzml, "Select mzML", mzml_patterns), "Raw HPLC-MS file for the fractionated sample. The core reads its base-peak chromatogram to form the upper trace.")
-    file_row(card, 1, "Filtered fraction table", var_filtered, lambda: browse_file(var_filtered, "Select filtered feature CSV", csv_patterns), "CSV produced by script 01. It should contain the retained fraction features with fraction index, retention time, and area columns.")
-    labeled_widget(card, "Sample name", make_entry(card, var_sample_name, "e.g. Hypericum hookerianum S19"), 2, 0, help_text="Used in the figure title and exported file names.")
-    file_row(card, 3, "Output directory", var_outdir, lambda: browse_dir(var_outdir, "Select output directory"), "Folder where SVG and PNG exports are written.")
-    labeled_widget(card, "Output preview", make_entry(card, var_output_preview), 4, 0, help_text="Generated from the sample name, output directory, and log-area option. This field is a preview only.")
+    project_card = make_card(workflow_scroll, "Project sample")
+    if project_samples:
+        sample_combo = make_combo(project_card, var_project_sample, [sample_prompt, *project_sample_names])
+        sample_combo.configure(command=lambda _choice: apply_project_sample_to_form() if var_project_sample.get() != sample_prompt else hide_workflow_sections("Select a launcher sample to fill the chromatogram, filtered table, output folder, and activity folder."))
+        labeled_widget(project_card, "Sample", sample_combo, 0, 0, help_text="Samples come from the main microfractionation launcher. Choose one to fill the chromatogram, filtered table, output folder, activity folder, and default fraction settings automatically.")
+        make_button(project_card, "Enter project files directly", lambda: open_inherited_settings(), width=190).grid(row=0, column=2, sticky="w", padx=(0, 18), pady=8)
+    else:
+        ctk.CTkLabel(
+            project_card,
+            text="No launcher project config was passed to this GUI. Manual path fields are available below.",
+            font=font_small,
+            text_color=colors["muted"],
+            anchor="w",
+            justify="left",
+            wraplength=960,
+        ).grid(row=0, column=0, columnspan=6, sticky="ew", pady=8)
+    ctk.CTkLabel(project_card, textvariable=var_project_summary, font=font_small, text_color=colors["muted"], anchor="w", justify="left", wraplength=1120).grid(row=1, column=0, columnspan=6, sticky="ew", pady=(2, 0))
 
-    card = make_card(workflow_scroll, "Fraction windows")
-    labeled_widget(card, "RT start (min)", make_entry(card, var_rt_start, "2.0"), 0, 0, help_text="Start of the first collected HPLC fraction. Used whenever the activity table does not provide explicit fraction start/end columns.")
-    labeled_widget(card, "Fraction width (min)", make_entry(card, var_fraction_width, "0.375"), 0, 2, help_text="Width of each collected fraction. With 2.0 min start, 0.375 min width, and 96 fractions, the windows span 2.0-38.0 min.")
-    labeled_widget(card, "Number of fractions", make_entry(card, var_n_fractions, "96"), 1, 0, help_text="Total number of uniform collected fractions. This should match the fractionation method and the indices in the script 01 output.")
+    activity_scroll = ctk.CTkFrame(workflow_scroll, fg_color="transparent")
+    activity_scroll.pack(fill="x", padx=0, pady=(0, 0))
 
-    card = make_card(workflow_scroll, "Plot styling")
-    labeled_widget(card, "Figure title", make_entry(card, var_title, "Leave blank to use the sample name"), 0, 0, help_text="Optional title override. Leave blank to use the sample name.")
-    labeled_widget(card, "X-axis label", make_entry(card, var_x_label), 0, 2, help_text="Label printed under the retention-time axis.")
-    labeled_widget(card, "Top Y label", make_entry(card, var_top_ylabel), 1, 0, help_text="Label for the upper chromatogram axis.")
-    labeled_widget(card, "Bottom Y label", make_entry(card, var_bottom_ylabel, "Leave blank for automatic"), 1, 2, help_text="Label for the lower feature-area axis. Leave blank to use Feature area or log10(total area) automatically.")
-    labeled_widget(card, "Activity Y label", make_entry(card, var_activity_ylabel, "Leave blank to use activity label"), 2, 0, help_text="Optional label for the right-side overlay axis.")
-    labeled_widget(card, "X max (min)", make_entry(card, var_x_max, "Auto"), 2, 2, help_text="Optional right limit for the retention-time axis. Leave blank to infer it from the chromatogram and fractions.")
-    labeled_widget(card, "Figure width", make_entry(card, var_width, "14"), 3, 0, help_text="Figure width in inches.")
-    labeled_widget(card, "Figure height", make_entry(card, var_height, "8"), 3, 2, help_text="Figure height in inches.")
-    labeled_widget(card, "Chromatogram color", make_entry(card, var_chrom_color, "#101b73"), 4, 0, help_text="Hex color for the chromatogram line.")
-    labeled_widget(card, "Dominant feature color", make_entry(card, var_dominant_color, "#101b73"), 4, 2, help_text="Hex color for the largest matched feature in each fraction.")
-    labeled_widget(card, "Remaining feature color", make_entry(card, var_remainder_color, "#ddd6cc"), 5, 0, help_text="Hex color for the sum of all remaining matched feature areas in the same fraction.")
-    labeled_widget(card, "Activity color", make_entry(card, var_activity_color, "#2f9e44"), 5, 2, help_text="Hex color for the activity overlay bars.")
-    labeled_widget(card, "Activity transparency", make_entry(card, var_activity_alpha, "0.28"), 6, 0, help_text="Alpha for the overlay bars, from 0 transparent to 1 opaque.")
-    options = ctk.CTkFrame(card, fg_color="transparent")
+    inherited_shell = ctk.CTkFrame(workflow_scroll, fg_color=colors["card"], border_color=colors["border"], border_width=1, corner_radius=16)
+    inherited_shell.pack(fill="x", padx=6, pady=(0, 12))
+    inherited_shell.grid_columnconfigure(0, weight=1)
+    inherited_header = ctk.CTkFrame(inherited_shell, fg_color="transparent")
+    inherited_header.grid(row=0, column=0, sticky="ew", padx=18, pady=(14, 14))
+    inherited_header.grid_columnconfigure(0, weight=1)
+    ctk.CTkLabel(inherited_header, text="Project files and output", font=font_card_title, text_color=colors["text"], anchor="w").grid(row=0, column=0, sticky="ew")
+    ctk.CTkLabel(inherited_header, text="These fields are normally filled from the selected launcher sample. Open only to override the chromatogram, filtered table, output folder, or figure name.", font=font_small, text_color=colors["muted"], anchor="w").grid(row=1, column=0, sticky="ew", pady=(4, 0))
+    inherited_body = ctk.CTkFrame(inherited_shell, fg_color="transparent")
+    for idx in range(6):
+        inherited_body.grid_columnconfigure(idx, weight=1 if idx % 2 == 1 else 0)
+
+    def update_inherited_visibility() -> None:
+        if var_show_inherited_settings.get():
+            inherited_toggle.configure(text="Hide file fields")
+            inherited_body.grid(row=1, column=0, sticky="ew", padx=18, pady=(0, 18))
+        else:
+            inherited_toggle.configure(text="Show file fields")
+            inherited_body.grid_remove()
+        save_state()
+
+    def toggle_inherited_visibility() -> None:
+        var_show_inherited_settings.set(not var_show_inherited_settings.get())
+        update_inherited_visibility()
+
+    def open_inherited_settings() -> None:
+        reveal_workflow_sections(reset_activity=True)
+        var_show_inherited_settings.set(True)
+        update_inherited_visibility()
+        var_project_summary.set("Project file fields are open for direct entry or troubleshooting.")
+
+    inherited_toggle = make_button(inherited_header, "Show file fields", toggle_inherited_visibility, width=150)
+    inherited_toggle.grid(row=0, column=1, rowspan=2, sticky="e", padx=(16, 0))
+    file_row(
+        inherited_body,
+        0,
+        "Representative chromatogram mzML",
+        var_mzml,
+        lambda: browse_file(var_mzml, "Select mzML", mzml_patterns, initial_dir=resolve_project_path((current_project_sample() or {}).get("raw_mzml_folder", ""))),
+        "Exact HPLC-MS mzML file drawn as the upper chromatogram. In normal use this is selected in the launcher sample record.",
+        example_path="example_data/hplc_mzml/example_mzml_file_list.csv",
+    )
+    labeled_widget(inherited_body, "Figure/sample name", make_entry(inherited_body, var_sample_name, "e.g. Ruta corsica 107"), 1, 0, help_text="Used in the figure title and exported file names. In normal use this comes from the launcher sample name.")
+    file_row(inherited_body, 2, "Filtered HPLC table", var_filtered, lambda: browse_file(var_filtered, "Select filtered feature CSV", csv_patterns), "CSV produced by Script 01 feature filtering. In normal use this comes from the selected sample.", example_path="example_data/mzmine_outputs/filtered_feature_table/example_filtered_feature_table.csv")
+    file_row(inherited_body, 3, "Output directory", var_outdir, lambda: browse_dir(var_outdir, "Select output directory"), "Folder where SVG and PNG exports are written. In normal use this comes from the selected sample.")
+    labeled_widget(inherited_body, "Output preview", make_entry(inherited_body, var_output_preview), 4, 0, help_text="Generated output filename preview. This field is read-only in normal use.", colspan=4)
+
+    export_shell = ctk.CTkFrame(workflow_scroll, fg_color=colors["card"], border_color=colors["border"], border_width=1, corner_radius=16)
+    export_shell.pack(fill="x", padx=6, pady=(0, 12))
+    export_shell.grid_columnconfigure(0, weight=1)
+    export_header = ctk.CTkFrame(export_shell, fg_color="transparent")
+    export_header.grid(row=0, column=0, sticky="ew", padx=18, pady=(14, 14))
+    export_header.grid_columnconfigure(0, weight=1)
+    ctk.CTkLabel(export_header, text="Advanced export options", font=font_card_title, text_color=colors["text"], anchor="w").grid(row=0, column=0, sticky="ew")
+    ctk.CTkLabel(export_header, text="Open this only when you need custom labels, colors, figure size, log scaling, or PNG export.", font=font_small, text_color=colors["muted"], anchor="w").grid(row=1, column=0, sticky="ew", pady=(4, 0))
+    export_body = ctk.CTkFrame(export_shell, fg_color="transparent")
+    for idx in range(6):
+        export_body.grid_columnconfigure(idx, weight=1 if idx % 2 == 1 else 0)
+
+    def update_export_visibility() -> None:
+        if var_show_export_options.get():
+            export_toggle.configure(text="Hide options")
+            export_body.grid(row=1, column=0, sticky="ew", padx=18, pady=(0, 18))
+        else:
+            export_toggle.configure(text="Show options")
+            export_body.grid_remove()
+        save_state()
+
+    def toggle_export_visibility() -> None:
+        var_show_export_options.set(not var_show_export_options.get())
+        update_export_visibility()
+
+    export_toggle = make_button(export_header, "Show options", toggle_export_visibility, width=126)
+    export_toggle.grid(row=0, column=1, rowspan=2, sticky="e", padx=(16, 0))
+    labeled_widget(export_body, "Figure title", make_entry(export_body, var_title, "Leave blank to use the sample name"), 0, 0, help_text="Optional title override. Leave blank to use the sample name.")
+    labeled_widget(export_body, "X-axis label", make_entry(export_body, var_x_label), 0, 2, help_text="Label printed under the retention-time axis.")
+    labeled_widget(export_body, "Top Y label", make_entry(export_body, var_top_ylabel), 1, 0, help_text="Label for the upper chromatogram axis.")
+    labeled_widget(export_body, "Bottom Y label", make_entry(export_body, var_bottom_ylabel, "Leave blank for automatic"), 1, 2, help_text="Label for the lower feature-area axis. Leave blank to use Feature area or log10(total area) automatically.")
+    labeled_widget(export_body, "Activity Y label", make_entry(export_body, var_activity_ylabel, "Leave blank to use activity label"), 2, 0, help_text="Optional label for the right-side overlay axis.")
+    labeled_widget(export_body, "X max (min)", make_entry(export_body, var_x_max, "Auto"), 2, 2, help_text="Optional right limit for the retention-time axis. Leave blank to infer it from the chromatogram and fractions.")
+    labeled_widget(export_body, "Figure width", make_entry(export_body, var_width, "14"), 3, 0, help_text="Figure width in inches.")
+    labeled_widget(export_body, "Figure height", make_entry(export_body, var_height, "8"), 3, 2, help_text="Figure height in inches.")
+    labeled_widget(export_body, "Chromatogram color", make_entry(export_body, var_chrom_color, "#101b73"), 4, 0, help_text="Hex color for the chromatogram line.")
+    labeled_widget(export_body, "Dominant feature color", make_entry(export_body, var_dominant_color, "#101b73"), 4, 2, help_text="Hex color for the largest matched feature in each fraction.")
+    labeled_widget(export_body, "Remaining feature color", make_entry(export_body, var_remainder_color, "#ddd6cc"), 5, 0, help_text="Hex color for the sum of all remaining matched feature areas in the same fraction.")
+    labeled_widget(export_body, "Activity color", make_entry(export_body, var_activity_color, "#2f9e44"), 5, 2, help_text="Hex color for the activity overlay bars.")
+    labeled_widget(export_body, "Activity transparency", make_entry(export_body, var_activity_alpha, "0.28"), 6, 0, help_text="Alpha for the overlay bars, from 0 transparent to 1 opaque.")
+    options = ctk.CTkFrame(export_body, fg_color="transparent")
     options.grid(row=7, column=0, columnspan=6, sticky="ew", pady=(8, 0))
     make_checkbox(options, "Use log10(total area)", var_log_total).pack(side="left", padx=(0, 18))
     make_checkbox(options, "Save SVG", var_save_svg).pack(side="left", padx=(0, 18))
     make_checkbox(options, "Save PNG", var_save_png).pack(side="left")
 
-    activity_scroll = ctk.CTkScrollableFrame(tab_frames["Activity data"], fg_color="transparent")
-    activity_scroll.pack(fill="both", expand=True, padx=8, pady=8)
-    input_mode_card = make_card(activity_scroll, "Activity input type")
+    activity_warning = ctk.CTkFrame(activity_scroll, fg_color="#3a3020", border_color="#8a6d2f", border_width=1, corner_radius=14)
+    activity_warning.pack(fill="x", padx=6, pady=(0, 12))
+    activity_warning.grid_columnconfigure(0, weight=1)
+    ctk.CTkLabel(
+        activity_warning,
+        text="Activity/intensity input is not filled automatically.",
+        font=("Segoe UI", 13, "bold"),
+        text_color="#f3d28b",
+        anchor="w",
+    ).grid(row=0, column=0, sticky="ew", padx=14, pady=(10, 2))
+    ctk.CTkLabel(
+        activity_warning,
+        text="Choose the exact plate-reader files or prepared activity table for this sample before previewing or exporting the figure.",
+        font=font_small,
+        text_color="#d9c79b",
+        anchor="w",
+        justify="left",
+        wraplength=1050,
+    ).grid(row=1, column=0, sticky="ew", padx=14, pady=(0, 10))
+
+    input_mode_card = make_card(activity_scroll, "Activity input")
     input_type_combo = make_combo(input_mode_card, var_activity_input_type, ["Table", "Plate reader"])
     input_type_combo.configure(command=lambda _choice: update_activity_input_visibility(reset_for_plate=True))
     labeled_widget(input_mode_card, "Input format", input_type_combo, 0, 0, help_text="Choose one input format. Table uses an already summarized fraction table. Plate reader detects and combines replicate raw well-plate exports directly.")
@@ -1026,23 +1299,23 @@ def main() -> int:
         )
 
         math_row = add_math_text(activity_math_body, math_row, "Direct plate-reader input", title=True)
-        math_row = add_math_text(activity_math_body, math_row, "Recommended starting point: keep plate scaling as raw fluorescence, then use Scale tallest signal to 100% if you want an easy 0-100% overlay.")
-        math_row = add_math_text(activity_math_body, math_row, "Raw fluorescence (no scaling)", title=True, pady=(6, 0))
+        math_row = add_math_text(activity_math_body, math_row, "Recommended starting point: keep plate scaling as raw intensity, then use Scale tallest signal to 100% if you want an easy 0-100% overlay.")
+        math_row = add_math_text(activity_math_body, math_row, "Raw intensity (no scaling)", title=True, pady=(6, 0))
         math_row = add_math_text(activity_math_body, math_row, "On one replicate plate, the raw number from each well is kept unchanged. No positive-control correction and no min-max scaling are applied.", pady=(0, 4))
-        math_row = render_formula_label(activity_math_body, "value on one replicate plate = raw fluorescence read from that well", math_row)
+        math_row = render_formula_label(activity_math_body, "value on one replicate plate = raw intensity read from that well", math_row)
         math_row = add_math_text(activity_math_body, math_row, "If several replicate plate files are selected, the same well position is averaged across plates. For fractions, this means A1 from each plate becomes fraction 1, A2 becomes fraction 2, and so on.", pady=(0, 4))
         math_row = render_formula_label(activity_math_body, "final value used for plotting = mean(raw A1 from plate 1, raw A1 from plate 2, ...)", math_row)
 
         math_row = add_math_text(activity_math_body, math_row, "Percent of positive control", title=True, pady=(6, 0))
         math_row = add_math_text(activity_math_body, math_row, "On each replicate plate, the app calculates the mean of the selected positive-control wells. Every well on that same plate is then converted to percent of that plate's control average.", pady=(0, 4))
-        math_row = render_formula_label(activity_math_body, "control average on this plate = mean(raw fluorescence in selected positive-control wells)", math_row)
-        math_row = render_formula_label(activity_math_body, "value on one replicate plate = 100 * raw fluorescence of this well / control average on this plate", math_row)
+        math_row = render_formula_label(activity_math_body, "control average on this plate = mean(raw intensity in selected positive-control wells)", math_row)
+        math_row = render_formula_label(activity_math_body, "value on one replicate plate = 100 * raw intensity of this well / control average on this plate", math_row)
         math_row = add_math_text(activity_math_body, math_row, "After this conversion, matching wells are averaged across replicate plates.", pady=(0, 4))
         math_row = render_formula_label(activity_math_body, "final value used for plotting = mean(percent-control value from plate 1, percent-control value from plate 2, ...)", math_row)
 
         math_row = add_math_text(activity_math_body, math_row, "Relative range within each plate (0-100)", title=True, pady=(6, 0))
         math_row = add_math_text(activity_math_body, math_row, "On each replicate plate, values are first converted to percent of the positive control. Then the lowest non-control sample well on that plate becomes 0 and the highest non-control sample well becomes 100.", pady=(0, 4))
-        math_row = render_formula_label(activity_math_body, "percent-control value = 100 * raw fluorescence of this well / control average on this plate", math_row)
+        math_row = render_formula_label(activity_math_body, "percent-control value = 100 * raw intensity of this well / control average on this plate", math_row)
         math_row = render_formula_label(activity_math_body, "value on one replicate plate = 100 * (percent-control value - lowest sample value on this plate) / (highest sample value on this plate - lowest sample value on this plate)", math_row)
         math_row = add_math_text(activity_math_body, math_row, "Only non-control wells are used to find the lowest and highest sample value. After this plate-level 0-100 scaling, matching wells are averaged across replicate plates.")
         math_row = render_formula_label(activity_math_body, "final value used for plotting = mean(0-100 value from plate 1, 0-100 value from plate 2, ...)", math_row)
@@ -1091,40 +1364,106 @@ def main() -> int:
     plate_picker.grid_columnconfigure(0, weight=1)
     make_entry(plate_picker, var_plate_files, "A_blue.xlsx; B_blue.xlsx").grid(row=0, column=0, sticky="ew", padx=(0, 8))
     make_button(plate_picker, "Browse", browse_plate_files, width=82).grid(row=0, column=1)
+    example_button(plate_picker, "example_data/activity/plate_reader/ruta_corsica_107_rep_1_8x12_plate.xlsx").grid(row=0, column=2, padx=(8, 0))
     ctk.CTkLabel(plate_mode_card, text="Plate files", font=font_label, text_color=colors["muted"], anchor="w").grid(row=1, column=0, sticky="w", padx=(0, 10), pady=7)
     labeled_widget(plate_mode_card, "Plate rows", make_entry(plate_mode_card, var_plate_rows, "8"), 2, 0, help_text="Number of lettered well rows in the assay plate. Use 8 for 96 wells, 4 for 24 wells, or 16 for 384 wells.")
     labeled_widget(plate_mode_card, "Plate columns", make_entry(plate_mode_card, var_plate_columns, "12"), 2, 2, help_text="Number of numbered well columns in the assay plate. Use 12 for 96 wells, 6 for 24 wells, or 24 for 384 wells.")
     labeled_widget(plate_mode_card, "Positive-control wells", make_entry(plate_mode_card, var_plate_controls, "H11, H12"), 3, 0, help_text="Wells containing positive controls on each replicate plate. Their mean is calculated from the selected raw plate files; no separate table is needed.")
     plate_scale_combo = make_combo(plate_mode_card, var_plate_scale_mode, list(plate_scale_labels))
     plate_scale_combo.configure(command=lambda _choice: save_state())
-    labeled_widget(plate_mode_card, "Plate scaling", plate_scale_combo, 3, 2, help_text="This prepares fluorescence values from replicate plates before plotting. Relative range within each plate makes the weakest and strongest non-control wells span 0 to 100 on every plate, which helps compare plates with different overall intensity. Percent of positive control preserves each value relative to the selected control wells. Raw fluorescence performs no plate-level scaling.")
+    labeled_widget(plate_mode_card, "Plate scaling", plate_scale_combo, 3, 2, help_text="This prepares intensity values from replicate plates before plotting. Relative range within each plate makes the weakest and strongest non-control wells span 0 to 100 on every plate, which helps compare plates with different overall intensity. Percent of positive control preserves each value relative to the selected control wells. Raw intensity performs no plate-level scaling.")
     labeled_widget(plate_mode_card, "Per-file controls", make_entry(plate_mode_card, var_plate_controls_by_file, "optional: 1:H11,H12; plate_2.xlsx:H10,H11"), 4, 0, help_text="Optional override when one replicate plate uses different positive-control wells. Use semicolon-separated entries keyed by replicate number or file name.", colspan=3)
-    labeled_widget(plate_mode_card, "Display meaning", make_combo(plate_mode_card, var_display_mode, list(display_mode_labels)), 5, 0, help_text="This controls how the prepared fluorescence values appear in the figure. Choose Show activity when lower fluorescence means stronger biological inhibition: wells with less signal become taller activity bars. Choose Show signal values when fluorescence itself is the desired readout.")
-    labeled_widget(plate_mode_card, "Overlay label", make_entry(plate_mode_card, var_activity_label, "Auto from display settings"), 5, 2, help_text="Optional right-axis label for the overlay bars. Leave blank to label the axis from the selected plate scaling and display meaning, for example normalized fluorescence, percent of positive control, or inhibition from signal.")
+    labeled_widget(plate_mode_card, "Display meaning", make_combo(plate_mode_card, var_display_mode, list(display_mode_labels)), 5, 0, help_text="This controls how the prepared intensity values appear in the figure. Choose Show activity when lower intensity means stronger biological inhibition: wells with less signal become taller activity bars. Choose Show signal values when the intensity signal itself is the desired readout.")
+    labeled_widget(plate_mode_card, "Overlay label", make_entry(plate_mode_card, var_activity_label, "Auto from display settings"), 5, 2, help_text="Optional right-axis label for the overlay bars. Leave blank to label the axis from the selected plate scaling and display meaning, for example normalized intensity, percent of positive control, or inhibition from signal.")
 
     table_input_card = make_card(activity_scroll, "Activity table")
-    file_row(table_input_card, 0, "Activity table", var_activity_path, lambda: browse_file(var_activity_path, "Select activity table", table_patterns), "Prepared table input only. One row should represent one fraction unless that row is a control row you exclude from plotting.", load_cmd=load_activity_table)
-    labeled_widget(table_input_card, "Excel sheet", make_combo(table_input_card, var_sheet_name, [""]), 1, 0, help_text="For Excel workbooks, choose the worksheet containing the fraction assay data. CSV/TSV files do not use this field.")
-    sheet_combo = table_input_card.grid_slaves(row=1, column=1)[0]
+    file_row(
+        table_input_card,
+        0,
+        "Activity table",
+        var_activity_path,
+        lambda: browse_file(var_activity_path, "Select activity table", table_patterns, initial_dir=sample_activity_dir(current_project_sample()) if current_project_sample() else None),
+        "Prepared table input only. The launcher points browsing to this sample's activity folder; choose the exact file for this sample here.",
+        load_cmd=load_activity_table,
+        example_path="example_data/activity/fraction_table/macleaya_microcarpa_84_activity_table.xlsx",
+    )
+    excel_sheet_header = ctk.CTkFrame(table_input_card, fg_color="transparent")
+    excel_sheet_header.grid(row=1, column=0, columnspan=6, sticky="ew", padx=(0, 18), pady=(4, 0))
+    excel_sheet_header.grid_columnconfigure(1, weight=1)
+    excel_sheet_check = make_checkbox(excel_sheet_header, "Choose Excel sheet", var_show_excel_sheet, command=lambda: update_excel_sheet_visibility())
+    excel_sheet_check.grid(row=0, column=0, sticky="w", padx=(0, 8))
+    make_help(excel_sheet_header, "Turn this on only for Excel workbooks when the assay data is not on the first sheet or the automatically selected sheet is wrong. CSV and TSV files do not use sheets.").grid(row=0, column=1, sticky="w")
+    excel_sheet_body = ctk.CTkFrame(table_input_card, fg_color="transparent")
+    excel_sheet_body.grid_columnconfigure(1, weight=1)
+    labeled_widget(excel_sheet_body, "Excel sheet", make_combo(excel_sheet_body, var_sheet_name, [""]), 0, 0, help_text="Worksheet containing the fraction assay data.")
+    sheet_combo = excel_sheet_body.grid_slaves(row=0, column=1)[0]
     sheet_combo.configure(command=reload_selected_sheet)
+
+    def update_excel_sheet_visibility() -> None:
+        if var_show_excel_sheet.get():
+            excel_sheet_body.grid(row=2, column=0, columnspan=6, sticky="ew", pady=(4, 8))
+        else:
+            excel_sheet_body.grid_remove()
+        save_state()
 
     table_column_card = make_card(activity_scroll, "Map activity columns")
     card = table_column_card
-    labeled_widget(card, "Fraction ID column", make_combo(card, var_fraction_column, [""]), 0, 0, help_text="Column that identifies collected fraction numbers, such as 1, 2, 3... Use this whenever control rows are mixed into the same table.")
-    combo_fraction = card.grid_slaves(row=0, column=1)[0]
-    labeled_widget(card, "Start-time column", make_combo(card, var_start_column, [""]), 0, 2, help_text="Optional explicit fraction start times in minutes. If blank, the uniform RT start/width from Workflow are used.")
-    combo_start = card.grid_slaves(row=0, column=3)[0]
-    labeled_widget(card, "End-time column", make_combo(card, var_end_column, [""]), 1, 0, help_text="Optional explicit fraction end times in minutes. Provide both start and end, or leave both blank.")
-    combo_end = card.grid_slaves(row=1, column=1)[0]
-    labeled_widget(card, "Value column", make_combo(card, var_value_column, [""]), 1, 2, help_text="Use a single precomputed measurement column such as average. Leave blank if you prefer to select replicate columns and let the app compute the mean.")
-    combo_value = card.grid_slaves(row=1, column=3)[0]
-    labeled_widget(card, "Replicate columns", make_entry(card, var_replicate_columns, "plate_1, plate_2"), 2, 0, help_text="Comma-separated replicate readout columns. When provided, their row-wise mean is used instead of the single value column.", colspan=3)
+    labeled_widget(card, "Replicate columns", make_entry(card, var_replicate_columns, "plate_1, plate_2"), 0, 0, help_text="Comma-separated replicate readout columns. These are averaged row by row. Fractions are assigned by row order: first data row is fraction 1, second row is fraction 2, and so on.", colspan=3)
+    make_button(card, "Select", lambda: select_activity_columns(var_replicate_columns, "Select replicate columns"), width=74).grid(row=0, column=4, sticky="ew", padx=(0, 8), pady=8)
     select_frame = ctk.CTkFrame(card, fg_color="transparent")
-    select_frame.grid(row=3, column=0, columnspan=6, sticky="ew", pady=(8, 0))
+    select_frame.grid(row=1, column=0, columnspan=6, sticky="ew", pady=(8, 0))
     select_frame.grid_columnconfigure(0, weight=1)
     column_list = tk.Listbox(select_frame, selectmode="extended", bg=colors["entry"], fg=colors["text"], selectbackground=colors["accent"], selectforeground="white", relief="flat", highlightthickness=1, highlightbackground=colors["border"], height=5, exportselection=False)
     column_list.grid(row=0, column=0, sticky="ew", padx=(0, 10))
     make_button(select_frame, "Use selected as replicates", use_selected_replicates, width=190).grid(row=0, column=1, sticky="n")
+
+    table_advanced_header = ctk.CTkFrame(card, fg_color=colors["card_alt"], corner_radius=10)
+    table_advanced_header.grid(row=2, column=0, columnspan=6, sticky="ew", pady=(12, 0))
+    table_advanced_header.grid_columnconfigure(0, weight=1)
+    ctk.CTkLabel(
+        table_advanced_header,
+        text="Advanced table mapping",
+        font=font_label,
+        text_color=colors["text"],
+        anchor="w",
+    ).grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 2))
+    ctk.CTkLabel(
+        table_advanced_header,
+        text="Use only when your table has non-uniform fraction windows or one precomputed value column instead of replicate columns.",
+        font=font_small,
+        text_color=colors["muted"],
+        anchor="w",
+        justify="left",
+        wraplength=900,
+    ).grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 10))
+    table_advanced_body = ctk.CTkFrame(card, fg_color="transparent")
+    for idx in range(6):
+        table_advanced_body.grid_columnconfigure(idx, weight=1 if idx % 2 == 1 else 0)
+
+    def update_table_advanced_visibility() -> None:
+        if var_show_table_advanced.get():
+            table_advanced_toggle.configure(text="Hide")
+            table_advanced_body.grid(row=3, column=0, columnspan=6, sticky="ew", pady=(10, 0))
+        else:
+            table_advanced_toggle.configure(text="Show")
+            table_advanced_body.grid_remove()
+        save_state()
+
+    def toggle_table_advanced_visibility() -> None:
+        var_show_table_advanced.set(not var_show_table_advanced.get())
+        update_table_advanced_visibility()
+
+    table_advanced_toggle = make_button(table_advanced_header, "Show", toggle_table_advanced_visibility, width=82)
+    table_advanced_toggle.grid(row=0, column=1, rowspan=2, sticky="e", padx=(8, 12), pady=10)
+    labeled_widget(table_advanced_body, "Start-time column", make_combo(table_advanced_body, var_start_column, [""]), 0, 0, help_text="Optional explicit fraction start times in minutes. Most users should leave this blank and use inherited uniform fraction windows.")
+    combo_start = table_advanced_body.grid_slaves(row=0, column=1)[0]
+    labeled_widget(table_advanced_body, "End-time column", make_combo(table_advanced_body, var_end_column, [""]), 0, 2, help_text="Optional explicit fraction end times in minutes. Provide both start and end, or leave both blank.")
+    combo_end = table_advanced_body.grid_slaves(row=0, column=3)[0]
+    make_button(table_advanced_body, "Select start", lambda: select_activity_column(var_start_column, "Select start-time column"), width=92).grid(row=0, column=4, sticky="ew", padx=(0, 8), pady=8)
+    make_button(table_advanced_body, "Select end", lambda: select_activity_column(var_end_column, "Select end-time column"), width=92).grid(row=0, column=5, sticky="ew", pady=8)
+    labeled_widget(table_advanced_body, "Single value column", make_combo(table_advanced_body, var_value_column, [""]), 1, 0, help_text="Fallback for tables that already contain one precomputed activity/intensity value per fraction. Leave blank when replicate columns are selected.", colspan=3)
+    combo_value = table_advanced_body.grid_slaves(row=1, column=1)[0]
+    make_button(table_advanced_body, "Select", lambda: select_activity_column(var_value_column, "Select single value column"), width=74).grid(row=1, column=4, sticky="ew", padx=(0, 8), pady=8)
 
     table_control_card = make_card(activity_scroll, "Controls and activity scaling")
     card = table_control_card
@@ -1192,6 +1531,7 @@ def main() -> int:
         help_text="Choose the column that contains the control reference values used for normalization. This is appropriate when control measurements have already been summarized elsewhere in the sheet instead of being stored as ordinary fraction rows.",
     )
     combo_control_scalar = separate_column_frame.grid_slaves(row=0, column=1)[0]
+    make_button(separate_column_frame, "Select", lambda: select_activity_column(var_control_scalar_column, "Select control summary column"), width=74).grid(row=0, column=2, sticky="ew", padx=(0, 8), pady=8)
 
     named_row_frame = ctk.CTkFrame(control_mode_host, fg_color="transparent")
     named_row_frame.grid_columnconfigure(1, weight=1)
@@ -1205,6 +1545,7 @@ def main() -> int:
         help_text="Choose the column that tells you what each row represents, for example a sample-name column, well-type column, or row-label column.",
     )
     combo_control_column = named_row_frame.grid_slaves(row=0, column=1)[0]
+    make_button(named_row_frame, "Select", lambda: select_activity_column(var_control_column, "Select row-name column"), width=74).grid(row=0, column=4, sticky="ew", padx=(0, 8), pady=8)
     labeled_widget(
         named_row_frame,
         "Control row name",
@@ -1216,7 +1557,7 @@ def main() -> int:
     make_checkbox(named_row_frame, "Exclude the named control row from plotted fractions", var_exclude_control_rows).grid(row=1, column=1, columnspan=3, sticky="w", pady=(6, 0))
 
     labeled_widget(card, "Display meaning", make_combo(card, var_display_mode, list(display_mode_labels)), 2, 0, help_text="Choose Show signal values to plot the processed measurement directly. Choose Scale tallest signal to 100% for a relative signal view. Choose Show activity when lower signal indicates stronger inhibition; it converts low signal into high activity bars.")
-    labeled_widget(card, "Overlay label", make_entry(card, var_activity_label, "Auto from display settings"), 3, 0, help_text="Optional right-axis label for the overlay bars. Leave blank to label the axis from the selected data transformation instead of calling every overlay bioactivity.", colspan=3)
+    labeled_widget(card, "Overlay label", make_entry(card, var_activity_label, "Auto from display settings"), 3, 0, help_text="Optional right-axis label for the overlay bars. Leave blank to label the axis from the selected data transformation instead of calling every overlay activity.", colspan=3)
 
     def update_control_source_visibility(_choice: str | None = None) -> None:
         for frame in [no_control_frame, manual_control_frame, separate_column_frame, named_row_frame]:
@@ -1240,6 +1581,23 @@ def main() -> int:
     activity_preview.insert("end", "Load an activity table to inspect rows, columns, and control locations.")
     activity_preview.configure(state="disabled")
 
+    def hide_workflow_sections(message: str | None = None) -> None:
+        workflow_sections_visible.set(False)
+        for section in [activity_scroll, inherited_shell, export_shell]:
+            section.pack_forget()
+        if message:
+            var_project_summary.set(message)
+
+    def reveal_workflow_sections(*, reset_activity: bool = False) -> None:
+        if reset_activity:
+            var_activity_input_type.set("Plate reader")
+        if not workflow_sections_visible.get():
+            activity_scroll.pack(fill="x", padx=0, pady=(0, 0))
+            inherited_shell.pack(fill="x", padx=6, pady=(0, 12))
+            export_shell.pack(fill="x", padx=6, pady=(0, 12))
+            workflow_sections_visible.set(True)
+        update_activity_input_visibility(reset_for_plate=reset_activity)
+
     def update_activity_input_visibility(*_args: Any, reset_for_plate: bool = False) -> None:
         is_plate = var_activity_input_type.get() == "Plate reader"
         visible = [plate_mode_card] if is_plate else [table_input_card, table_column_card, table_control_card, table_preview_card]
@@ -1251,6 +1609,8 @@ def main() -> int:
         if is_plate and reset_for_plate:
             var_activity_path.set("")
             var_sheet_name.set("")
+            var_show_excel_sheet.set(False)
+            update_excel_sheet_visibility()
             var_start_column.set("")
             var_end_column.set("")
             var_replicate_columns.set("")
@@ -1293,10 +1653,20 @@ def main() -> int:
     ctk.CTkLabel(status_bar, textvariable=var_status, font=font_small, text_color=colors["muted"], anchor="w").grid(row=0, column=0, sticky="ew", padx=18, pady=8)
 
     # Startup and traces
+    update_inherited_visibility()
+    update_export_visibility()
+    update_table_advanced_visibility()
+    update_excel_sheet_visibility()
     refresh_column_controls()
     refresh_column_list()
     update_control_source_visibility()
     update_activity_input_visibility()
+    if project_samples:
+        var_project_sample.set(sample_prompt)
+        hide_workflow_sections("Select a launcher sample to fill this form automatically.")
+    else:
+        reveal_workflow_sections(reset_activity=True)
+        var_project_summary.set("No launcher project config detected. Use manual paths below.")
     for variable in [var_sample_name, var_outdir, var_log_total]:
         variable.trace_add("write", update_output_preview)
     update_output_preview()
@@ -1315,3 +1685,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

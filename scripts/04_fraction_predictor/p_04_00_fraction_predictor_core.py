@@ -23,7 +23,7 @@ if str(_REPO_DIR) not in sys.path:
     sys.path.insert(0, str(_REPO_DIR))
 
 try:
-    from shared import bioassay_plate_reader as plate_reader
+    from support import bioassay_plate_reader as plate_reader
 except Exception:  # pragma: no cover - handled when plate-reader input is requested
     plate_reader = None  # type: ignore[assignment]
 
@@ -62,7 +62,13 @@ def read_table(path: str | Path, **kwargs: Any) -> pd.DataFrame:
 
 def read_table_columns(path: str | Path, **kwargs: Any) -> list[str]:
     """Return column names from a supported table."""
-    return [str(col) for col in read_table(path, **kwargs).columns]
+    path = Path(path)
+    suffix = path.suffix.lower()
+    if suffix in {".csv", ".txt"}:
+        return [str(col) for col in pd.read_csv(path, nrows=0, **kwargs).columns]
+    if suffix in {".xlsx", ".xls"}:
+        return [str(col) for col in pd.read_excel(path, nrows=0, **kwargs).columns]
+    raise ValueError(f"Unsupported file type for {path}. Use CSV or Excel.")
 
 
 def write_table(df: pd.DataFrame, path: str | Path) -> Path:
@@ -275,11 +281,11 @@ def load_feature_order_landmarks(config: dict[str, Any], *, base_dir: str | Path
         table_df = pd.DataFrame(rows)
 
     if table_df.empty:
-        raise ValueError("Feature-order alignment requires at least two landmark rows.")
+        raise ValueError("Feature-order anchor-pair mode requires at least two anchor-pair rows.")
 
-    anchor_col = _first_existing_column(table_df, ["anchor_id", "landmark_id", "anchor", "id"], "feature-order landmark table")
-    hrms_rt_col = _first_existing_column(table_df, ["hrms_rt", "HRMS RT", "uplc_rt", "UPLC RT"], "feature-order landmark table")
-    hplc_fraction_col = _first_existing_column(table_df, ["hplc_fraction", "fraction_index", "fraction", "matched_fraction"], "feature-order landmark table")
+    anchor_col = _first_existing_column(table_df, ["anchor_id", "landmark_id", "anchor", "id"], "feature-order anchor-pair table")
+    hrms_rt_col = _first_existing_column(table_df, ["hrms_rt", "HRMS RT", "uplc_rt", "UPLC RT"], "feature-order anchor-pair table")
+    hplc_fraction_col = _first_existing_column(table_df, ["hplc_fraction", "fraction_index", "fraction", "matched_fraction"], "feature-order anchor-pair table")
 
     optional_cols = {
         "hrms_feature_id": ["hrms_feature_id", "hrms_id", "feature_id", "row ID"],
@@ -303,14 +309,14 @@ def load_feature_order_landmarks(config: dict[str, Any], *, base_dir: str | Path
     out = out.sort_values(["hrms_rt", "hplc_fraction", "anchor_id"]).reset_index(drop=True)
 
     if len(out) < 2:
-        raise ValueError("Feature-order alignment requires at least two valid landmarks with anchor ID, HRMS RT, and HPLC fraction.")
+        raise ValueError("Feature-order anchor-pair mode requires at least two valid anchor pairs with anchor ID, HRMS RT, and HPLC fraction.")
     if out["hrms_rt"].duplicated().any():
         duplicate = out.loc[out["hrms_rt"].duplicated(), "hrms_rt"].iloc[0]
-        raise ValueError(f"Feature-order landmarks must have unique HRMS RT values. Duplicate RT: {duplicate}")
+        raise ValueError(f"Feature-order anchor pairs must have unique HRMS RT values. Duplicate RT: {duplicate}")
     if (out["hplc_fraction"].diff().dropna() < 0).any():
         raise ValueError(
-            "Feature-order landmark conflict: HPLC fraction numbers must increase with HRMS retention time. "
-            "Remove or correct anchors whose order crosses."
+            "Feature-order anchor-pair conflict: HPLC fraction numbers must increase with HRMS retention time. "
+            "Remove or correct anchor pairs whose order crosses."
         )
     return out
 
@@ -324,7 +330,7 @@ def apply_feature_order_alignment(
     near_anchor_rt_tolerance: float = 0.02,
 ) -> pd.DataFrame:
     require_columns(df, [rt_column], "feature table before feature-order alignment")
-    require_columns(landmarks_df, ["anchor_id", "hrms_rt", "hplc_fraction"], "feature-order landmark table")
+    require_columns(landmarks_df, ["anchor_id", "hrms_rt", "hplc_fraction"], "feature-order anchor-pair table")
 
     anchors = landmarks_df.sort_values("hrms_rt").reset_index(drop=True)
     anchor_rts = anchors["hrms_rt"].to_numpy(dtype=float)
@@ -463,6 +469,73 @@ def apply_rt_calibration(
     return out
 
 
+def _normalise_feature_id(value: Any) -> str:
+    """Return a stable string key for feature-ID matching across CSV/XLSX tables."""
+    if pd.isna(value):
+        return ""
+    if isinstance(value, (int, np.integer)):
+        return str(int(value))
+    if isinstance(value, (float, np.floating)) and float(value).is_integer():
+        return str(int(value))
+    text = str(value).strip()
+    if text.endswith(".0"):
+        numeric = pd.to_numeric(pd.Series([text]), errors="coerce").iloc[0]
+        if pd.notna(numeric) and float(numeric).is_integer():
+            return str(int(numeric))
+    return text
+
+
+def apply_known_calibration_rts(
+    df: pd.DataFrame,
+    pairs_df: pd.DataFrame,
+    *,
+    feature_id_column: str,
+    pairs_feature_id_column: str,
+    hplc_rt_column: str,
+    predicted_rt_column: str = "predicted_hplc_rt",
+    assignment_rt_column: str = "__fraction_assignment_rt",
+) -> pd.DataFrame:
+    """Attach verified calibration RTs and prefer them for fraction assignment.
+
+    The regression prediction remains in ``predicted_rt_column``. Rows whose
+    feature ID occurs in the calibration table retain the reported HPLC RT in
+    ``Real RT`` and use that value only for fraction-window assignment.
+    """
+    require_columns(df, [feature_id_column, predicted_rt_column], "feature table for calibration RT override")
+    require_columns(
+        pairs_df,
+        [pairs_feature_id_column, hplc_rt_column],
+        "calibration pairs table for known RT override",
+    )
+
+    pairs = pairs_df[[pairs_feature_id_column, hplc_rt_column]].copy()
+    pairs["__feature_id__"] = pairs[pairs_feature_id_column].map(_normalise_feature_id)
+    pairs["__real_rt__"] = pd.to_numeric(pairs[hplc_rt_column], errors="coerce")
+    pairs = pairs[(pairs["__feature_id__"] != "") & pairs["__real_rt__"].notna()].copy()
+
+    conflicting = pairs.groupby("__feature_id__")["__real_rt__"].nunique()
+    conflicting_ids = conflicting[conflicting > 1].index.tolist()
+    if conflicting_ids:
+        preview = ", ".join(conflicting_ids[:5])
+        raise ValueError(
+            "Calibration pairs assign more than one HPLC RT to the same feature ID "
+            f"({preview}). Keep one verified RT per feature ID."
+        )
+
+    rt_by_id = pairs.drop_duplicates("__feature_id__").set_index("__feature_id__")["__real_rt__"]
+    out = df.copy()
+    out["Part of calibration"] = "no"
+    out["Real RT"] = np.nan
+    out[assignment_rt_column] = pd.to_numeric(out[predicted_rt_column], errors="coerce")
+
+    real_rt = out[feature_id_column].map(_normalise_feature_id).map(rt_by_id)
+    matched = real_rt.notna()
+    out.loc[matched, "Part of calibration"] = "yes"
+    out.loc[matched, "Real RT"] = real_rt.loc[matched]
+    out.loc[matched, assignment_rt_column] = real_rt.loc[matched]
+    return out
+
+
 # ---------------------------
 # Fractions
 # ---------------------------
@@ -573,7 +646,7 @@ def match_features_to_fractions(
 
 
 # ---------------------------
-# Fluorescence and bioactivity
+# Activity and intensity response values
 # ---------------------------
 
 
@@ -587,15 +660,16 @@ def prepare_fluorescence_table(
     percent_column: str = "fluorescence_percent",
     bioactivity_column: str = "bioactivity",
 ) -> pd.DataFrame:
-    require_columns(df, [fraction_column, average_column, positive_control_column], "fluorescence table")
+    require_columns(df, [fraction_column, average_column, positive_control_column], "activity/intensity table")
     out = df.copy()
     out[fraction_column] = pd.to_numeric(out[fraction_column], errors="coerce")
     out[average_column] = pd.to_numeric(out[average_column], errors="coerce")
+    out["average"] = out[average_column].astype(float)
     out[positive_control_column] = pd.to_numeric(out[positive_control_column], errors="coerce")
     out = out.dropna(subset=[fraction_column, average_column]).copy()
 
     if out.empty:
-        raise ValueError("Fluorescence table does not contain any valid fraction/average rows.")
+        raise ValueError("Activity/intensity table does not contain any valid fraction/average rows.")
 
     positive = out[positive_control_column].replace(0, np.nan)
 
@@ -625,17 +699,19 @@ def prepare_fluorescence_table(
         normalized = out[average_column].astype(float) / positive.astype(float)
 
     max_norm = float(pd.to_numeric(normalized, errors="coerce").max())
-    if max_norm == 0 or math.isnan(max_norm):
-        raise ValueError("Cannot normalize fluorescence because the maximum normalized signal is zero or NaN.")
-
     out[normalized_column] = normalized
+    if max_norm == 0 or math.isnan(max_norm):
+        out[percent_column] = 0.0
+        out[bioactivity_column] = 0.0
+        return out
+
     out[percent_column] = out[normalized_column] / max_norm * 100.0
     out[bioactivity_column] = 100.0 - out[percent_column]
     return out
 
 
 def fluorescence_table_from_config(plant_cfg: dict[str, Any], base_dir: str | Path) -> tuple[pd.DataFrame, dict[str, str]]:
-    """Load fraction bioactivity data from a conventional table or raw plate files."""
+    """Load fraction activity/intensity data from a conventional table or raw plate files."""
 
     input_type = str(plant_cfg.get("fluorescence_input_type", "table") or "table").strip().lower()
     if input_type in {"table", "spreadsheet", "csv", "excel"}:
@@ -648,16 +724,16 @@ def fluorescence_table_from_config(plant_cfg: dict[str, Any], base_dir: str | Pa
         }
 
     if input_type not in {"plate_reader", "plate", "well_plate"}:
-        raise ValueError(f"Unknown fluorescence input type: {plant_cfg.get('fluorescence_input_type')!r}")
+        raise ValueError(f"Unknown activity/intensity input type: {plant_cfg.get('fluorescence_input_type')!r}")
     if plate_reader is None:
-        raise ImportError("Plate-reader input requires shared/bioassay_plate_reader.py in the workflow repository.")
+        raise ImportError("Plate-reader input requires support/bioassay_plate_reader.py.")
 
     files = plant_cfg.get("plate_files") or plant_cfg.get("fluorescence_plate_files") or []
     if isinstance(files, str):
         files = plate_reader.split_list(files)
     plate_files = [str(resolve_path(base_dir, path)) for path in files]
     if not plate_files:
-        raise ValueError("Plate-reader fluorescence input requires at least one file in 'plate_files'.")
+        raise ValueError("Plate-reader activity/intensity input requires at least one file in 'plate_files'.")
 
     table = plate_reader.build_fraction_activity_table(
         plate_files,
@@ -669,6 +745,7 @@ def fluorescence_table_from_config(plant_cfg: dict[str, Any], base_dir: str | Pa
         control_wells_by_plate=plant_cfg.get("plate_positive_control_wells_by_file")
         or plant_cfg.get("control_wells_by_plate"),
         scale_mode=str(plant_cfg.get("plate_scale_mode", "positive_control_then_minmax_0_100") or "positive_control_then_minmax_0_100"),
+        excluded_wells=plant_cfg.get("plate_excluded_wells", plant_cfg.get("excluded_wells", "")),
         exclude_control_wells=bool(plant_cfg.get("plate_exclude_control_wells", True)),
     )
     return table, {
@@ -688,6 +765,41 @@ def make_group_labels(cutoffs: list[float]) -> list[str]:
         labels.append(f"group_{low:g}_to_{high:g}")
     labels.append(f"group_above_{values[-1]:g}")
     return labels
+
+
+def parse_cutoff_values(raw: Any) -> list[float]:
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        values = [part.strip() for part in raw.replace(";", ",").split(",") if part.strip()]
+    elif isinstance(raw, (list, tuple, set)):
+        values = list(raw)
+    else:
+        values = [raw]
+    return sorted(float(value) for value in values)
+
+
+def global_response_cutoffs(config: dict[str, Any]) -> list[float]:
+    raw = (config.get("bioactivity", {}) or {}).get("cutoffs", [16.5, 22.5])
+    parsed = parse_cutoff_values(raw)
+    return parsed or [16.5, 22.5]
+
+
+def plant_response_cutoffs(plant_cfg: dict[str, Any], config: dict[str, Any]) -> list[float]:
+    for key in ("response_cutoffs", "bioactivity_cutoffs", "cutoffs"):
+        if key in plant_cfg and plant_cfg.get(key) not in (None, ""):
+            parsed = parse_cutoff_values(plant_cfg.get(key))
+            if parsed:
+                return parsed
+    return global_response_cutoffs(config)
+
+
+def aggregate_group_counts(group_counts: list[dict[str, int]]) -> dict[str, int]:
+    aggregated: dict[str, int] = {}
+    for counts in group_counts:
+        for label, count in counts.items():
+            aggregated[str(label)] = aggregated.get(str(label), 0) + int(count)
+    return aggregated
 
 
 def grouping_metric_from_config(config: dict[str, Any]) -> str:
@@ -722,7 +834,7 @@ def grouping_metric_label(metric: str) -> str:
     if metric == "bioactivity":
         return "derived activity (100 - relative signal)"
     if metric == "fluorescence_percent":
-        return "relative fluorescence/signal (% of maximum)"
+        return "relative intensity/signal (% of maximum)"
     if metric == "average":
         return "raw or plate-processed signal average"
     return metric
@@ -737,6 +849,93 @@ def grouping_value_column(metric: str) -> str:
     if metric == "average":
         return "average"
     return metric
+
+
+def plant_uses_plate_reader(plant_cfg: dict[str, Any]) -> bool:
+    input_type = str(plant_cfg.get("fluorescence_input_type", "table") or "table").strip().lower()
+    return input_type in {"plate_reader", "plate", "well_plate"}
+
+
+def plant_grouping_metric(plant_cfg: dict[str, Any], config: dict[str, Any]) -> str:
+    return grouping_metric_from_config(config)
+
+
+def response_direction_from_config(plant_cfg: dict[str, Any], config: dict[str, Any]) -> str:
+    raw = (
+        plant_cfg.get("response_direction")
+        or plant_cfg.get("signal_meaning")
+        or (config.get("bioactivity", {}) or {}).get("response_direction")
+        or (config.get("bioactivity", {}) or {}).get("signal_meaning")
+        or ""
+    )
+    text = str(raw).strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "higher": "higher",
+        "high": "higher",
+        "higher_is_better": "higher",
+        "higher_signal_is_better": "higher",
+        "higher_signal_higher_response": "higher",
+        "higher_value_higher_response": "higher",
+        "higher_signal_means_stronger_response": "higher",
+        "lower": "lower",
+        "low": "lower",
+        "lower_is_better": "lower",
+        "lower_signal_is_better": "lower",
+        "lower_signal_higher_response": "lower",
+        "lower_value_higher_response": "lower",
+        "lower_signal_means_stronger_response": "lower",
+    }
+    if text in aliases:
+        return aliases[text]
+    if plant_uses_plate_reader(plant_cfg):
+        return "lower"
+    return "higher"
+
+
+def _is_percent_like(values: pd.Series) -> bool:
+    numeric = pd.to_numeric(values, errors="coerce").dropna()
+    if numeric.empty:
+        return False
+    return float(numeric.min()) >= 0.0 and float(numeric.max()) <= 100.0
+
+
+def add_selected_response_column(
+    df: pd.DataFrame,
+    *,
+    source_column: str,
+    direction: str,
+    output_column: str = "selected_response",
+) -> tuple[pd.DataFrame, str]:
+    require_columns(df, [source_column], "activity/intensity table")
+    out = df.copy()
+    values = pd.to_numeric(out[source_column], errors="coerce")
+    direction = "lower" if str(direction).strip().lower() == "lower" else "higher"
+
+    if direction == "higher":
+        if source_column == "bioactivity" and "fluorescence_percent" in out.columns:
+            response = pd.to_numeric(out["fluorescence_percent"], errors="coerce")
+            label = "selected response (higher signal = stronger response)"
+        else:
+            response = values
+            label = "selected response (higher value = stronger response)"
+    else:
+        if source_column == "bioactivity":
+            response = values
+            label = "selected response (lower signal = stronger response)"
+        else:
+            max_value = float(values.max()) if values.notna().any() else 0.0
+            if not np.isfinite(max_value) or max_value == 0:
+                response = 0.0
+            else:
+                response = 100.0 - (values.astype(float) / max_value * 100.0)
+            label = "selected response (100 - signal scaled to maximum; lower signal = stronger response)"
+
+    out[output_column] = response
+    return out, label
+
+
+def plant_grouping_label(plant_cfg: dict[str, Any], metric: str, fluoro_columns: dict[str, str] | None = None) -> str:
+    return grouping_metric_label(metric)
 
 
 
@@ -772,7 +971,7 @@ def assign_bioactivity_groups(
 def _numeric_summary(values: pd.Series) -> dict[str, float | int | None]:
     numeric = pd.to_numeric(values, errors="coerce").dropna()
     if numeric.empty:
-        return {"count": 0, "min": None, "q10": None, "q30": None, "median": None, "q70": None, "q90": None, "max": None}
+        return {"count": 0, "min": None, "q10": None, "q30": None, "median": None, "q70": None, "q80": None, "q90": None, "q95": None, "max": None}
     return {
         "count": int(len(numeric)),
         "min": float(numeric.min()),
@@ -780,7 +979,9 @@ def _numeric_summary(values: pd.Series) -> dict[str, float | int | None]:
         "q30": float(numeric.quantile(0.30)),
         "median": float(numeric.quantile(0.50)),
         "q70": float(numeric.quantile(0.70)),
+        "q80": float(numeric.quantile(0.80)),
         "q90": float(numeric.quantile(0.90)),
+        "q95": float(numeric.quantile(0.95)),
         "max": float(numeric.max()),
     }
 
@@ -791,58 +992,77 @@ def _group_counts_for_cutoffs(values: pd.Series, cutoffs: list[float]) -> dict[s
 
 
 def recommend_bioactivity_cutoffs(values: pd.Series) -> list[float]:
-    """Suggest cutoffs that isolate roughly the top 30% and top 10% highest response values."""
+    """Suggest cutoffs that isolate the top five and top one response fractions."""
 
     numeric = pd.to_numeric(values, errors="coerce").dropna()
     if numeric.empty:
         return []
-    lower = float(numeric.quantile(0.70))
-    upper = float(numeric.quantile(0.90))
+    ranked = sorted((float(value) for value in numeric), reverse=True)
+    upper = ranked[0]
+    lower = ranked[min(4, len(ranked) - 1)]
     if lower == upper:
-        unique_values = sorted(float(value) for value in numeric.unique())
-        if len(unique_values) >= 3:
-            lower = unique_values[max(0, int(len(unique_values) * 0.70) - 1)]
-            upper = unique_values[max(0, int(len(unique_values) * 0.90) - 1)]
-        elif len(unique_values) == 2:
-            lower, upper = unique_values
+        lower = float(numeric.quantile(0.80))
+        upper = float(numeric.quantile(0.95))
+    if lower == upper:
+        unique_values = sorted((float(value) for value in numeric.unique()), reverse=True)
+        if len(unique_values) >= 2:
+            upper = unique_values[0]
+            lower = unique_values[min(1, len(unique_values) - 1)]
         else:
             return [unique_values[0]]
+    if lower > upper:
+        lower, upper = upper, lower
     return [round(lower, 3), round(upper, 3)]
 
 
 def preview_bioactivity_cutoffs(config: dict[str, Any]) -> dict[str, Any]:
-    """Read plant bioactivity inputs and summarize cutoff behavior without writing outputs."""
+    """Read plant activity inputs and summarize cutoff behavior without writing outputs."""
 
     base_dir = Path(config.get("base_dir", Path(__file__).resolve().parent))
-    current_cutoffs = [float(x) for x in config.get("bioactivity", {}).get("cutoffs", [16.5, 22.5])]
+    current_cutoffs = global_response_cutoffs(config)
     metric = grouping_metric_from_config(config)
     metric_column = grouping_value_column(metric)
     plant_previews: list[dict[str, Any]] = []
     pooled_values: list[float] = []
+    plant_current_cutoffs: list[list[float]] = []
+    plant_current_counts: list[dict[str, int]] = []
 
     for plant_cfg in config.get("plants", []) or []:
         plant_name = str(plant_cfg.get("name", "plant")).strip() or "plant"
         fluoro_df, fluoro_columns = fluorescence_table_from_config(plant_cfg, base_dir)
+        plant_metric = plant_grouping_metric(plant_cfg, config)
+        plant_metric_column = grouping_value_column(plant_metric)
         prepared = prepare_fluorescence_table(
             fluoro_df,
             fraction_column=fluoro_columns["fraction_column"],
             average_column=fluoro_columns["average_column"],
             positive_control_column=fluoro_columns["positive_control_column"],
         )
-        require_columns(prepared, [metric_column], "prepared fluorescence preview table")
-        values = pd.to_numeric(prepared[metric_column], errors="coerce").dropna()
+        response_direction = response_direction_from_config(plant_cfg, config)
+        prepared, response_label = add_selected_response_column(
+            prepared,
+            source_column=plant_metric_column,
+            direction=response_direction,
+        )
+        values = pd.to_numeric(prepared["selected_response"], errors="coerce").dropna()
         pooled_values.extend(float(value) for value in values)
         recommended = recommend_bioactivity_cutoffs(values)
+        effective_cutoffs = plant_response_cutoffs(plant_cfg, config)
+        current_counts = _group_counts_for_cutoffs(values, effective_cutoffs)
+        plant_current_cutoffs.append(effective_cutoffs)
+        plant_current_counts.append(current_counts)
         plant_previews.append({
             "plant": plant_name,
             "input_type": plant_cfg.get("fluorescence_input_type", "table"),
-            "grouping_metric": metric,
-            "grouping_metric_label": grouping_metric_label(metric),
+            "grouping_metric": plant_metric,
+            "grouping_metric_label": response_label,
+            "source_grouping_column": plant_metric_column,
+            "response_direction": response_direction,
             "fraction_count": int(len(values)),
             "summary": _numeric_summary(values),
-            "current_cutoffs": current_cutoffs,
+            "current_cutoffs": effective_cutoffs,
             "recommended_cutoffs": recommended,
-            "current_group_counts": _group_counts_for_cutoffs(values, current_cutoffs),
+            "current_group_counts": current_counts,
             "recommended_group_counts": _group_counts_for_cutoffs(values, recommended) if recommended else {},
             "response_values": [float(value) for value in values],
             "bioactivity_values": [float(value) for value in values],
@@ -850,13 +1070,19 @@ def preview_bioactivity_cutoffs(config: dict[str, Any]) -> dict[str, Any]:
 
     pooled_series = pd.Series(pooled_values, dtype=float)
     pooled_recommended = recommend_bioactivity_cutoffs(pooled_series)
+    same_current_cutoffs = bool(plant_current_cutoffs) and all(values == plant_current_cutoffs[0] for values in plant_current_cutoffs)
+    preview_current_cutoffs = plant_current_cutoffs[0] if same_current_cutoffs else current_cutoffs
+    if plant_current_cutoffs and not same_current_cutoffs:
+        preview_current_cutoffs = []
     return {
-        "current_cutoffs": current_cutoffs,
+        "current_cutoffs": preview_current_cutoffs,
+        "global_cutoffs": current_cutoffs,
+        "current_cutoffs_are_plant_specific": bool(plant_current_cutoffs and not same_current_cutoffs),
         "recommended_cutoffs": pooled_recommended,
         "grouping_metric": metric,
-        "grouping_metric_label": grouping_metric_label(metric),
+        "grouping_metric_label": plant_previews[0]["grouping_metric_label"] if len({p.get("grouping_metric_label") for p in plant_previews}) == 1 else grouping_metric_label(metric),
         "summary": _numeric_summary(pooled_series),
-        "current_group_counts": _group_counts_for_cutoffs(pooled_series, current_cutoffs) if pooled_values else {},
+        "current_group_counts": aggregate_group_counts(plant_current_counts) if plant_current_counts else (_group_counts_for_cutoffs(pooled_series, current_cutoffs) if pooled_values else {}),
         "recommended_group_counts": _group_counts_for_cutoffs(pooled_series, pooled_recommended) if pooled_recommended else {},
         "plants": plant_previews,
     }
@@ -885,7 +1111,7 @@ def map_fraction_groups_to_features(
     plant_name: str,
 ) -> pd.DataFrame:
     require_columns(feature_df, [parsed_fractions_column], "feature table before bioactivity mapping")
-    require_columns(fraction_bio_df, [fraction_column, bioactivity_column, group_column], "plant bioactivity table")
+    require_columns(fraction_bio_df, [fraction_column, bioactivity_column, group_column], "plant activity/intensity table")
 
     slug = slugify(plant_name)
     out = feature_df.copy()
@@ -1080,10 +1306,14 @@ def add_target_report_columns(
             present_text = "; ".join(present_names)
             absent_text = "; ".join(absent_names)
             activity_text = " | ".join(text for _, text in sorted(activity_parts, key=lambda item: item[0]))
-            rt_text = _format_float(row.get(predicted_rt_column))
+            predicted_rt_text = _format_float(row.get(predicted_rt_column))
+            real_rt_text = _format_float(row.get("Real RT"))
             fraction_value = row.get(matched_fraction_column, "")
             fraction_text = "" if pd.isna(fraction_value) else str(fraction_value).strip()
-            rt_part = f"Predicted HPLC RT {rt_text}" if rt_text else "Predicted HPLC RT unavailable"
+            if str(row.get("Part of calibration", "")).strip().lower() == "yes" and real_rt_text:
+                rt_part = f"Known HPLC RT {real_rt_text}"
+            else:
+                rt_part = f"Predicted HPLC RT {predicted_rt_text}" if predicted_rt_text else "Predicted HPLC RT unavailable"
             if not fraction_text or fraction_text.lower() == "no predicted rt":
                 fraction_part = "no fraction assignment"
             elif fraction_text.lower() == "fraction not collected":
@@ -1156,6 +1386,8 @@ def merge_human_readable_report_by_id(
         internal_cols.append(spec["present_col"])
     leading_cols = [
         base_id,
+        "Part of calibration",
+        "Real RT",
         predicted_rt_column,
         "matched_fraction",
         "parsed_fraction_numbers",
@@ -1175,6 +1407,123 @@ def merge_human_readable_report_by_id(
     excluded = set(existing_leading + final_cols + internal_cols)
     remaining = [col for col in merged.columns if col not in excluded]
     return merged[existing_leading + remaining + final_cols]
+
+
+def reorder_final_feature_table(
+    df: pd.DataFrame,
+    *,
+    id_column: str,
+    mz_column: str,
+    rt_column: str,
+    annotation_columns: list[str],
+    plants_cfg: list[dict[str, Any]],
+    predicted_rt_column: str,
+) -> pd.DataFrame:
+    """Place identity, annotation, and interpretation columns in a readable order."""
+    identity_cols = [col for col in [id_column, mz_column, rt_column] if col in df.columns]
+    annotation_cols = [col for col in annotation_columns if col in df.columns and col not in identity_cols]
+    plant_cols = []
+    internal_cols = []
+    for spec in _plant_result_columns(plants_cfg):
+        plant_cols.extend([spec["group_col"], spec["value_col"]])
+        internal_cols.append(spec["present_col"])
+    mapping_cols = [
+        "Part of calibration",
+        "Real RT",
+        predicted_rt_column,
+        "matched_fraction",
+        "parsed_fraction_numbers",
+        "alignment_mode",
+        "alignment_status",
+        "left_anchor_id",
+        "right_anchor_id",
+        "candidate_fraction_start",
+        "candidate_fraction_end",
+        "candidate_fraction_count",
+        "target_plants_present",
+        "target_plants_absent",
+        *plant_cols,
+    ]
+    mapping_cols = [col for col in mapping_cols if col in df.columns and col not in identity_cols + annotation_cols]
+    final_cols = ["target_interpretation"] if "target_interpretation" in df.columns else []
+    excluded = set(identity_cols + annotation_cols + mapping_cols + final_cols + internal_cols)
+    remaining = [col for col in df.columns if col not in excluded]
+    return df[identity_cols + annotation_cols + remaining + mapping_cols + final_cols]
+
+
+
+
+def build_full_feature_table_report(
+    feature_df: pd.DataFrame,
+    final_filtered_df: pd.DataFrame,
+    *,
+    id_column: str,
+    mz_column: str,
+    rt_column: str,
+    annotation_columns: list[str],
+    plants_cfg: list[dict[str, Any]],
+    predicted_rt_column: str,
+) -> pd.DataFrame:
+    """Return the original full feature table with filtered-run report columns appended.
+
+    The fraction predictor only calculates fraction/activity assignments for
+    features that pass the selected peak-area threshold. This export keeps all
+    original feature rows and leaves appended report columns empty for features
+    that did not pass that threshold.
+    """
+
+    full_df, full_id_column, _generated = normalize_id_column(feature_df, id_column)
+    if id_column not in final_filtered_df.columns:
+        return reorder_final_feature_table(
+            full_df,
+            id_column=full_id_column,
+            mz_column=mz_column,
+            rt_column=rt_column,
+            annotation_columns=annotation_columns,
+            plants_cfg=plants_cfg,
+            predicted_rt_column=predicted_rt_column,
+        )
+
+    def normalize_id(value: Any) -> str:
+        if pd.isna(value):
+            return ""
+        if isinstance(value, (int, np.integer)):
+            return str(int(value))
+        if isinstance(value, (float, np.floating)) and float(value).is_integer():
+            return str(int(value))
+        text = str(value).strip()
+        if text.endswith(".0"):
+            numeric = pd.to_numeric(text, errors="coerce")
+            if pd.notna(numeric) and float(numeric).is_integer():
+                return str(int(numeric))
+        return text
+
+    appended_columns = [col for col in final_filtered_df.columns if col not in full_df.columns]
+    if not appended_columns:
+        return reorder_final_feature_table(
+            full_df,
+            id_column=full_id_column,
+            mz_column=mz_column,
+            rt_column=rt_column,
+            annotation_columns=annotation_columns,
+            plants_cfg=plants_cfg,
+            predicted_rt_column=predicted_rt_column,
+        )
+
+    left = full_df.copy()
+    right = final_filtered_df[[id_column] + appended_columns].drop_duplicates(subset=[id_column]).copy()
+    left["__merge_id__"] = left[full_id_column].map(normalize_id)
+    right["__merge_id__"] = right[id_column].map(normalize_id)
+    merged = left.merge(right.drop(columns=[id_column]), on="__merge_id__", how="left").drop(columns=["__merge_id__"])
+    return reorder_final_feature_table(
+        merged,
+        id_column=full_id_column,
+        mz_column=mz_column,
+        rt_column=rt_column,
+        annotation_columns=annotation_columns,
+        plants_cfg=plants_cfg,
+        predicted_rt_column=predicted_rt_column,
+    )
 
 
 def write_post_run_analysis(
@@ -1209,12 +1558,17 @@ def write_post_run_analysis(
     present_any_mask = pd.concat(present_masks, axis=1).any(axis=1) if present_masks else pd.Series(False, index=combined_df.index)
     collected_present_any_mask = collected_mask & present_any_mask
 
-    high_group = make_group_labels([float(x) for x in sorted(cutoffs)])[-1]
+    default_cutoff_config = {"bioactivity": {"cutoffs": cutoffs}}
+    plant_cutoffs_by_slug = {
+        slugify(str(plant_cfg["name"])): plant_response_cutoffs(plant_cfg, default_cutoff_config)
+        for plant_cfg in plants_cfg
+    }
     high_masks = []
     for spec in plant_specs:
         if spec["present_col"] in combined_df.columns and spec["group_col"] in combined_df.columns:
             present = combined_df[spec["present_col"]].apply(_coerce_bool) == True  # noqa: E712
-            high = combined_df[spec["group_col"]].astype(str) == high_group
+            plant_high_group = make_group_labels(plant_cutoffs_by_slug.get(spec["slug"], cutoffs))[-1]
+            high = combined_df[spec["group_col"]].astype(str) == plant_high_group
             high_masks.append(present & high)
     high_any_mask = pd.concat(high_masks, axis=1).any(axis=1) if high_masks else pd.Series(False, index=combined_df.index)
     collected_high_any_mask = collected_mask & high_any_mask
@@ -1376,7 +1730,8 @@ def write_post_run_analysis(
                     }
                 )
                 if spec["present_col"] in combined_df.columns and spec["group_col"] in combined_df.columns:
-                    high_count = int(((present == True) & (combined_df[spec["group_col"]].astype(str) == high_group)).sum())  # noqa: E712
+                    plant_high_group = make_group_labels(plant_cutoffs_by_slug.get(spec["slug"], cutoffs))[-1]
+                    high_count = int(((present == True) & (combined_df[spec["group_col"]].astype(str) == plant_high_group)).sum())  # noqa: E712
                 else:
                     high_count = 0
                 high_rows.append({"plant": spec["name"], "highest_activity": high_count})
@@ -1487,7 +1842,7 @@ def run_pipeline(config: dict[str, Any]) -> dict[str, Any]:
         )
         calibration_summary: dict[str, Any] = {
             "method": "feature_order_alignment",
-            "source": str(calibration_cfg.get("landmarks_file", "config landmarks") or "config landmarks"),
+        "source": str(calibration_cfg.get("landmarks_file", "config anchor pairs") or "config anchor pairs"),
             "n_points": int(len(landmarks_df)),
             "near_anchor_rt_tolerance": float(calibration_cfg.get("near_anchor_rt_tolerance", 0.02)),
             "landmarks": landmarks_df.to_dict(orient="records"),
@@ -1500,12 +1855,40 @@ def run_pipeline(config: dict[str, Any]) -> dict[str, Any]:
             calibration=calibration,
             output_column=predicted_rt_column,
         )
+        assignment_rt_column = predicted_rt_column
+        calibration_summary = calibration.to_dict()
+        if bool(calibration_cfg.get("use_known_hplc_rt_for_feature_ids", False)):
+            pairs_path = resolve_path(base_dir, calibration_cfg["pairs_file"])
+            pairs_df = read_table(pairs_path)
+            pairs_feature_id_column = str(calibration_cfg.get("feature_id_column", "")).strip()
+            if not pairs_feature_id_column:
+                raise ValueError(
+                    "Choose the calibration-table feature ID column before using known HPLC RTs for matching IDs."
+                )
+            predicted_df = apply_known_calibration_rts(
+                predicted_df,
+                pairs_df,
+                feature_id_column=resolved_id_column,
+                pairs_feature_id_column=pairs_feature_id_column,
+                hplc_rt_column=calibration_cfg["hplc_rt_column"],
+                predicted_rt_column=predicted_rt_column,
+            )
+            assignment_rt_column = "__fraction_assignment_rt"
+            calibration_summary["known_hplc_rt_override"] = {
+                "enabled": True,
+                "feature_id_column": pairs_feature_id_column,
+                "n_known_feature_rows": int((predicted_df["Part of calibration"] == "yes").sum()),
+                "n_unique_known_feature_ids": int(
+                    predicted_df.loc[predicted_df["Part of calibration"] == "yes", resolved_id_column].nunique()
+                ),
+            }
         predicted_df = match_features_to_fractions(
             predicted_df,
             fraction_df,
-            time_column=predicted_rt_column,
+            time_column=assignment_rt_column,
         )
-        calibration_summary = calibration.to_dict()
+        if assignment_rt_column != predicted_rt_column:
+            predicted_df = predicted_df.drop(columns=[assignment_rt_column])
 
     plants_cfg = config.get("plants", [])
     if not plants_cfg:
@@ -1516,29 +1899,39 @@ def run_pipeline(config: dict[str, Any]) -> dict[str, Any]:
 
     for plant_cfg in plants_cfg:
         plant_name = plant_cfg["name"]
-        grouping_metric = grouping_metric_from_config(config)
-        grouping_column = grouping_value_column(grouping_metric)
         fluoro_df, fluoro_columns = fluorescence_table_from_config(plant_cfg, base_dir)
+        grouping_metric = plant_grouping_metric(plant_cfg, config)
+        grouping_column = grouping_value_column(grouping_metric)
         fluoro_prepared = prepare_fluorescence_table(
             fluoro_df,
             fraction_column=fluoro_columns["fraction_column"],
             average_column=fluoro_columns["average_column"],
             positive_control_column=fluoro_columns["positive_control_column"],
         )
+        response_direction = response_direction_from_config(plant_cfg, config)
+        fluoro_prepared, response_label = add_selected_response_column(
+            fluoro_prepared,
+            source_column=grouping_column,
+            direction=response_direction,
+        )
+        plant_cutoffs = plant_response_cutoffs(plant_cfg, config)
         fluoro_grouped = assign_bioactivity_groups(
             fluoro_prepared,
-            bioactivity_column=grouping_column,
-            cutoffs=[float(x) for x in config.get("bioactivity", {}).get("cutoffs", [16.5, 22.5])],
+            bioactivity_column="selected_response",
+            cutoffs=plant_cutoffs,
         )
-        fluoro_grouped["grouping_value_column"] = grouping_column
-        fluoro_grouped["grouping_value_label"] = grouping_metric_label(grouping_metric)
+        fluoro_grouped["response_cutoffs"] = ", ".join(f"{value:g}" for value in plant_cutoffs)
+        fluoro_grouped["source_grouping_value_column"] = grouping_column
+        fluoro_grouped["response_direction"] = response_direction
+        fluoro_grouped["grouping_value_column"] = "selected_response"
+        fluoro_grouped["grouping_value_label"] = response_label
 
         combined_df = map_fraction_groups_to_features(
             combined_df,
             fluoro_grouped,
             parsed_fractions_column="parsed_fraction_numbers",
             fraction_column=fluoro_columns["fraction_column"],
-            bioactivity_column=grouping_column,
+            bioactivity_column="selected_response",
             group_column="bioactivity_group",
             plant_name=plant_name,
         )
@@ -1557,14 +1950,25 @@ def run_pipeline(config: dict[str, Any]) -> dict[str, Any]:
                 "name": plant_name,
                 "slug": plant_slug,
                 "file": str(plant_output_path),
+                "response_cutoffs": plant_cutoffs,
             }
         )
 
-    filtered_path = write_table(filtered_df, output_dir / "01_filtered_feature_table.csv")
-    fraction_path = write_table(fraction_df, output_dir / "02_fraction_windows.csv")
-    predicted_path = write_table(predicted_df, output_dir / "03_features_with_fraction_predictions.csv")
-    combined_path = write_table(combined_df, output_dir / "04_features_with_bioactivity.csv")
+    output_files: dict[str, str] = {}
+    debug_exports = bool(config.get("debug_exports", config.get("advanced_debug_exports", False)))
+    if debug_exports:
+        debug_dir = ensure_directory(output_dir / "Debug_exports")
+        output_files["debug_filtered_feature_table"] = str(write_table(filtered_df, debug_dir / "01_filtered_feature_table.csv"))
+        output_files["debug_fraction_windows"] = str(write_table(fraction_df, debug_dir / "02_fraction_windows.csv"))
+        output_files["debug_features_with_fraction_predictions"] = str(write_table(predicted_df, debug_dir / "03_features_with_fraction_predictions.csv"))
+        output_files["debug_features_with_activity_mapping"] = str(write_table(combined_df, debug_dir / "04_features_with_activity_mapping.csv"))
 
+    final_df = add_target_report_columns(
+        combined_df.copy(),
+        plants_cfg,
+        predicted_rt_column=predicted_rt_column,
+    )
+    final_annotation_columns: list[str] = []
     extra_outputs: dict[str, Any] = {}
     append_cfg = config.get("append_to_feature_table")
     if append_cfg:
@@ -1585,43 +1989,58 @@ def run_pipeline(config: dict[str, Any]) -> dict[str, Any]:
             for col in append_cfg.get("columns_to_add", append_cfg.get("annotation_columns", [])) or []
             if str(col).strip()
         ]
-        if selected_annotation_cols:
+        final_annotation_columns = selected_annotation_cols or [
+            str(col) for col in append_df.columns if str(col) != str(annotation_match_column)
+        ]
+        final_annotation_columns = [
+            col for col in final_annotation_columns
+            if str(col) != str(annotation_match_column)
+        ]
+        columns_to_merge = [col for col in final_annotation_columns if col not in combined_df.columns]
+        if columns_to_merge:
             keep_cols = [annotation_match_column]
-            for col in selected_annotation_cols:
+            for col in columns_to_merge:
                 if col not in keep_cols:
                     keep_cols.append(col)
             require_columns(append_df, keep_cols, "annotation table for final report")
             append_df = append_df[keep_cols].copy()
-        plant_result_cols = []
-        for spec in _plant_result_columns(plants_cfg):
-            plant_result_cols.extend([spec["present_col"], spec["group_col"], spec["value_col"]])
-        merge_columns = [
-            predicted_rt_column,
-            "matched_fraction",
-            "parsed_fraction_numbers",
-            "alignment_mode",
-            "alignment_status",
-            "left_anchor_id",
-            "right_anchor_id",
-            "candidate_fraction_start",
-            "candidate_fraction_end",
-            "candidate_fraction_count",
-            *plant_result_cols,
-        ]
-        merge_columns = [col for col in merge_columns if col in combined_df.columns]
-        merged_df = merge_human_readable_report_by_id(
-            append_df,
-            combined_df,
-            id_column=append_cfg.get("id_column"),
-            base_id_column=annotation_match_column,
-            annotation_id_column=feature_match_column,
-            columns_to_add=merge_columns,
-            plants_cfg=plants_cfg,
-            predicted_rt_column=predicted_rt_column,
-        )
-        merged_path = write_table(merged_df, output_dir / "05_appended_feature_table_with_bioactivity.csv")
-        extra_outputs["human_readable_feature_report"] = str(merged_path)
-        extra_outputs["appended_feature_table"] = str(merged_path)
+            final_df = merge_human_readable_report_by_id(
+                combined_df,
+                append_df,
+                id_column=resolved_id_column,
+                base_id_column=feature_match_column,
+                annotation_id_column=annotation_match_column,
+                columns_to_add=columns_to_merge,
+                plants_cfg=plants_cfg,
+                predicted_rt_column=predicted_rt_column,
+            )
+
+    final_df = reorder_final_feature_table(
+        final_df,
+        id_column=resolved_id_column,
+        mz_column=feature_cfg.get("mz_column", "row m/z"),
+        rt_column=feature_cfg.get("rt_column", "row retention time"),
+        annotation_columns=final_annotation_columns,
+        plants_cfg=plants_cfg,
+        predicted_rt_column=predicted_rt_column,
+    )
+    final_path = write_table(final_df, output_dir / "final_feature_table_with_fraction_activity.csv")
+    extra_outputs["final_feature_table"] = str(final_path)
+    extra_outputs["human_readable_feature_report"] = str(final_path)
+    extra_outputs["appended_feature_table"] = str(final_path)
+
+    full_final_df = build_full_feature_table_report(
+        feature_df,
+        final_df,
+        id_column=resolved_id_column,
+        mz_column=feature_cfg.get("mz_column", "row m/z"),
+        rt_column=feature_cfg.get("rt_column", "row retention time"),
+        annotation_columns=final_annotation_columns,
+        plants_cfg=plants_cfg,
+        predicted_rt_column=predicted_rt_column,
+    )
+    full_final_path = write_table(full_final_df, output_dir / "full_feature_table_with_fraction_activity.csv")
+    extra_outputs["full_feature_table_with_fraction_activity"] = str(full_final_path)
 
     analysis_outputs = write_post_run_analysis(
         combined_df,
@@ -1630,7 +2049,7 @@ def run_pipeline(config: dict[str, Any]) -> dict[str, Any]:
         predicted_rt_column=predicted_rt_column,
         total_input_count=int(len(feature_df)),
         filtered_count=int(len(filtered_df)),
-        cutoffs=[float(x) for x in config.get("bioactivity", {}).get("cutoffs", [16.5, 22.5])],
+        cutoffs=global_response_cutoffs(config),
     )
     extra_outputs.update(analysis_outputs)
 
@@ -1643,10 +2062,7 @@ def run_pipeline(config: dict[str, Any]) -> dict[str, Any]:
         "n_rows_filtered": int(len(filtered_df)),
         "output_dir": str(output_dir),
         "files": {
-            "filtered_feature_table": str(filtered_path),
-            "fraction_windows": str(fraction_path),
-            "features_with_fraction_predictions": str(predicted_path),
-            "features_with_bioactivity": str(combined_path),
+            **output_files,
             **extra_outputs,
         },
         "plants": plant_outputs,
@@ -1666,7 +2082,7 @@ def run_pipeline(config: dict[str, Any]) -> dict[str, Any]:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Predict HPLC fractions and map fluorescence-derived bioactivity to LC-MS features. "
+            "Predict HPLC fractions and map fraction activity/intensity values to LC-MS features. "
             "Use a JSON config file so the same core can be reused from CLI, GUI, or Jupyter."
         )
     )

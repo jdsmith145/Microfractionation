@@ -1,0 +1,22 @@
+{
+  "samples": [
+    {
+      "display_name": "Ruta corsica 107",
+      "file_safe_sample_name": "ruta_corsica_107",
+      "mzml_sample_files": [
+        "example_data/hplc_mzml/002-D1M-A5-20260226_02_ruta_corsica_107_rep1.mzML"
+      ],
+      "blank_files": [
+        "example_data/hplc_mzml/001-D1M-A8-20260226_01_blank_ACN.mzML"
+      ],
+      "activity_folder": "example_data/activity/plate_reader",
+      "representative_chromatogram_mzml": "example_data/hplc_mzml/002-D1M-A5-20260226_02_ruta_corsica_107_rep1.mzML",
+      "main_table_peak_area_column": "ruta_corsica_107_sample_1.mzML Peak area"
+    }
+  ],
+  "fraction_collection": {
+    "collection_start_time_min": 2.0,
+    "collection_end_time_min": 38.0,
+    "number_of_collected_fractions": 96
+  }
+}

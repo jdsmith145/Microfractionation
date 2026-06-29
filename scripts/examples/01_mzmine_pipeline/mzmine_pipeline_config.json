@@ -1,0 +1,42 @@
+{
+  "sample_name": "demo_sample",
+  "sample_files": [
+    "raw/demo_sample.mzML"
+  ],
+  "blank_files": [
+    "raw/demo_blank.mzML"
+  ],
+  "stages": [
+    "prepare",
+    "run_complete",
+    "run_fraction",
+    "match"
+  ],
+  "complete": {
+    "template_path": "../../01_mzmine_pipeline/templates/big_empty_template.mzbatch",
+    "out_dir": "outputs/configured_batches",
+    "feature_dir": "outputs/complete_feature_table",
+    "blank_pattern": "*blank*"
+  },
+  "fraction": {
+    "template_path": "../../01_mzmine_pipeline/templates/fraction_empty_template.mzbatch",
+    "out_dir": "outputs/configured_batches",
+    "feature_dir": "outputs/fraction_feature_tables",
+    "rt_start": 2.0,
+    "rt_end": 3.0,
+    "width": 0.5
+  },
+  "mzmine": {
+    "executable": "C:/Program Files/MZmine/mzmine_console.exe",
+    "user_file": "",
+    "temp_dir": "outputs/mzmine_temp",
+    "memory": "none",
+    "threads": "auto",
+    "ignore_parameter_warnings": true
+  },
+  "matching": {
+    "outdir": "outputs/filtered_feature_table",
+    "mz_tol": 0.1,
+    "rt_tol": 0.1
+  }
+}

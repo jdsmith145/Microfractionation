@@ -1,0 +1,3 @@
+role,example_filename,notes
+sample,002-D1M-A5-20260226_02_ruta_corsica_107_rep1.mzML,Real mzML exported from the LC-MS instrument.
+blank,001-D1M-A8-20260226_01_blank_ACN.mzML,Blank solvent/control injection for MZmine blank handling.

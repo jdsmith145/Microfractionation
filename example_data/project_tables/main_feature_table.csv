@@ -1,0 +1,5 @@
+row ID,row m/z,row retention time,neutral M mass,example_blank_1.mzML Peak area,ruta_corsica_107_sample_1.mzML Peak area,macleaya_microcarpa_84_sample_1.mzML Peak area
+101,231.1382,0.59,230.1309,0,165500,64128
+102,226.1996,0.88,225.1923,120,0,158000
+103,288.9195,2.42,287.9122,0,50533,0
+104,329.1021,4.81,328.0948,0,220000,17000

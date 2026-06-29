@@ -15,45 +15,55 @@ Feature table requirements:
 - UPLC retention-time column, for example `row retention time`.
 - one or more sample peak-area columns.
 
-Calibration options:
+Visible GUI calibration options:
 
-- matched UPLC/HPLC retention-time pairs.
-- explicit linear equation.
-- runtime scaling fallback.
-- feature-order alignment for non-comparable gradients. This uses landmark features selected in the HRMS table and the script 01 filtered HPLC table, then assigns candidate fraction intervals between landmarks instead of predicting one exact HPLC retention time.
+- gradient calibration with matched UPLC/HPLC retention-time pairs.
+- feature-order anchor pairs for non-comparable gradients. This uses paired anchor features selected in the HRMS table and the script 01 filtered HPLC table, then assigns candidate fraction intervals between anchors instead of predicting one exact HPLC retention time.
 
-Feature-order landmark table requirements, when imported from CSV/Excel:
+### Known calibration feature RTs
 
-- `anchor_id`: readable landmark name such as `A1`.
-- `hrms_rt`: HRMS retention time of the landmark feature.
+When a matched-RT pairs table also contains the main feature-table ID, select its **Feature ID column** and enable **Use known HPLC RT for matching feature IDs**. For every filtered feature whose ID occurs in that table, the report records `Part of calibration = yes` and the entered HPLC RT in `Real RT`. Fraction assignment uses `Real RT` for those known features; all other features use the regression prediction in `predicted_hplc_rt`.
+
+This is optional. It does not change the fitted regression, and `predicted_hplc_rt` remains in the report so the measured and predicted values can be compared. A feature ID must map to one unambiguous HPLC RT in the pairs table.
+
+The core still accepts older `equation` and `runtime_scale` configs for compatibility, but these are no longer recommended as normal GUI choices.
+
+Feature-order anchor-pair table requirements, when imported from CSV/Excel:
+
+- `anchor_id`: readable anchor pair name such as `A1`.
+- `hrms_rt`: HRMS retention time of the anchor-pair feature.
 - `hplc_fraction`: fraction number from the script 01 filtered HPLC table.
 - optional `hrms_feature_id` and `hplc_feature_id` columns for traceability.
 
 Plant or fraction response inputs:
 
 - one plant card per biological sample or extract.
-- fluorescence, activity, or other response table with fraction numbers, measured average values, and positive-control values when normalization is needed.
+- intensity, activity, or other response table with fraction numbers, measured average values, and positive-control values when normalization is needed.
 - alternatively, direct plate-reader files from replicate fraction bioassays. In the GUI plant card, choose `Plate reader`, select all replicate files, set plate dimensions, and enter positive-control wells.
 - plate-reader fraction mapping is row-major by default: `A1 = 1`, `A2 = 2`, ..., `H12 = 96` for a 96-well plate.
-- bins can be based on derived activity (`100 - relative signal`), relative fluorescence/signal, or raw/plate-processed signal average. Use the GUI preview to inspect distributions and suggested cutoffs before exporting a full run.
+- bins can be based on derived activity (`100 - relative signal`), relative intensity/signal, or raw/plate-processed signal average. The plant card also asks whether higher or lower signal means stronger response, so cutoffs always apply to the selected response direction. Use the GUI preview to inspect distributions and suggested cutoffs before exporting a full run.
 
 Annotation inputs:
 
-- If the main feature table already contains annotations, mark it as annotated in the GUI and no second file is needed.
-- If annotations are in a separate table, enable `Use a separate annotation table`, load that file, choose the matching column in the prediction table, choose the matching column in the annotation table, and select the annotation columns to keep.
-- The matching columns may have different names, but their values must identify the same features, for example `row ID` in the prediction table and `feature_id` in the annotation table.
-- If no annotation columns are selected, the final human-readable report keeps all columns from the annotation table.
+- In the normal launcher workflow, the shared SIRIUS/CANOPUS annotation table is loaded automatically.
+- The main feature table supplies m/z, retention time, and sample intensity columns; the annotation table supplies interpretation columns such as `molecularFormula` and `NPC#class`.
+- The default match is `row ID` in the main feature table to `mappingFeatureId` in the SIRIUS/CANOPUS table.
+- Select only the annotation columns that should appear in the final report. If no annotation columns are selected, the final report keeps all columns from the annotation table.
 
 ## Outputs
 
 Main CSV outputs:
 
-- `01_filtered_feature_table.csv`.
-- `02_fraction_windows.csv`.
-- `03_features_with_fraction_predictions.csv`.
-- `04_features_with_bioactivity.csv`. The filename is kept for compatibility, but the mapped values can represent derived activity, relative fluorescence/signal, or raw/plate-processed response depending on the selected grouping value.
-- `05_appended_feature_table_with_bioactivity.csv` when an annotated table is supplied. The filename is kept for compatibility.
+- `final_feature_table_with_fraction_activity.csv`: the main user-facing table for features that passed the selected peak-area threshold. It preserves the filtered original feature-table columns, adds selected annotation columns near the feature identity/RT columns, and appends predicted fraction, candidate-fraction interval, activity/intensity group, and interpretation columns. When known calibration feature RTs are enabled, it also includes `Part of calibration` and `Real RT`; those real RTs determine the corresponding fraction assignments.
+- `full_feature_table_with_fraction_activity.csv`: the complete original feature table with the same report columns appended. Rows below the peak-area threshold are retained, but prediction/activity fields are empty because they were not processed by the filtering step.
 - one response-by-fraction CSV per plant. Existing filenames use `bioactivity_by_fraction` for compatibility.
+- `run_summary.json`.
+
+Intermediate debug outputs:
+
+- By default, the script no longer writes the older intermediate tables `01_filtered_feature_table.csv`, `02_fraction_windows.csv`, `03_features_with_fraction_predictions.csv`, and `04_features_with_bioactivity.csv`.
+- In the GUI, enable **Write debug tables** to write those diagnostic tables into `Debug_exports/`.
+- In a JSON config, set `"debug_exports": true` for the same behavior.
 
 Post-run analysis:
 
@@ -67,7 +77,7 @@ Post-run analysis:
 python p_04_01_fraction_predictor_gui.py
 ```
 
-For feature-order alignment, use the `Alignment` tab when the HRMS table is large. The tab lets users search and page through the HRMS and HPLC tables, filter HRMS features by sample-column intensity threshold, retention-time range, and m/z range, then add landmark pairs without loading the entire table into one visible list.
+For feature-order anchor-pair mapping, use the `Alignment` tab when the HRMS table is large. The tab lets users search and page through the HRMS and HPLC tables, filter HRMS features by sample-column intensity threshold, retention-time range, and m/z range, then add anchor pairs without loading the entire table into one visible list.
 
 ## CLI example
 
@@ -79,9 +89,9 @@ python p_04_00_fraction_predictor_core.py `
 ## Common issues
 
 - Calibration pairs must have numeric UPLC and HPLC retention-time columns.
-- Feature-order alignment requires at least two landmark features whose HRMS retention times and HPLC fraction numbers increase in the same order. It is intended for mixed gradients or isocratic sections where interpolation would be misleading.
-- Features outside the first/last landmark are marked as outside anchors and are not assigned response summaries.
-- Fraction numbers in fluorescence tables must match generated or configured fraction numbers.
+- Feature-order anchor-pair mode requires at least two anchor features whose HRMS retention times and HPLC fraction numbers increase in the same order. It is intended for mixed gradients or isocratic sections where interpolation would be misleading.
+- Features outside the first/last anchor pair are marked as outside anchors and are not assigned response summaries.
+- Fraction numbers in activity/intensity tables must match generated or configured fraction numbers.
 - Sample columns used for filtering are usually the same samples that need plant cards.
-- `05_appended_feature_table_with_bioactivity.csv` only contains molecule/class/formula annotations if the selected annotation table actually contains those columns and the matching columns point to the same feature IDs.
-- Use the response preview before a full run when choosing cutoffs. The preview reads the configured response inputs, shows the current bins, and suggests percentile-based cutoffs.
+- The final feature table only contains molecule/class/formula annotations if the selected annotation table actually contains those columns and the matching columns point to the same feature IDs.
+- Use the response preview before a full run when choosing cutoffs. The preview reads the configured response inputs, shows the current bins, and suggests cutoffs intended to separate the top five response fractions and the strongest single response fraction.

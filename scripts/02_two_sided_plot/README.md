@@ -2,15 +2,17 @@
 
 ## Purpose
 
-This step creates a combined visualization: HPLC chromatogram on top, fraction-associated feature intensity in the middle, and an optional fraction response overlay below. The response overlay can represent raw fluorescence, normalized fluorescence, or derived activity depending on the settings chosen by the user.
+This step creates a combined visualization: HPLC chromatogram on top, fraction-associated feature intensity in the middle, and an optional fraction response overlay below. The response overlay can represent raw intensity, normalized intensity, or derived activity depending on the settings chosen by the user.
 
 ## Inputs
 
-Required:
+Required when opened as a standalone script:
 
 - sample chromatogram `.mzML`.
 - filtered feature CSV from script 01.
 - sample name.
+
+When launched from `p_microfractionation_launcher.py`, the GUI inherits the filtered HPLC table, output folder, fraction timing defaults, and sample activity folder from the project config. The user normally only chooses the exact chromatogram `.mzML` and the exact activity file(s) for the selected sample.
 
 Filtered feature CSV must contain:
 
@@ -18,16 +20,16 @@ Filtered feature CSV must contain:
 - `rt` or alias such as `retention_time`.
 - `area` or alias such as `Peak area`.
 
-Optional response/activity table:
+Optional response/activity input:
 
 - CSV, TSV, TXT, XLSX, or XLS.
 - fraction number column.
-- activity, fluorescence, or other response-value column, or replicate columns with normalization settings.
-- optional start/end columns for non-uniform fraction windows.
+- replicate intensity/activity columns with normalization settings.
+- advanced fallback: one precomputed value column instead of replicate columns.
 
 Optional direct plate-reader input:
 
-- this is an alternative to the optional prepared bioactivity table; select one input mode in the GUI, not both.
+- this is an alternative to a prepared fraction-by-row activity/intensity table; select one input mode in the GUI, not both.
 - select all replicate plate-reader files in the GUI activity tab.
 - set plate rows and columns, for example 8 x 12 for a 96-well plate.
 - enter positive-control wells such as `H11,H12`.
@@ -46,6 +48,14 @@ Optional direct plate-reader input:
 ```powershell
 python p_02_01_two_sided_plot_gui.py
 ```
+
+In normal use, start the main launcher first:
+
+```powershell
+python p_microfractionation_launcher.py
+```
+
+Then choose the sample in the launcher and open **Two-sided plot**. Inherited paths are hidden by default but can be opened under **Inherited paths and fraction windows**.
 
 ## CLI example
 

@@ -1,31 +1,41 @@
-# Python generated files
+# Python caches
 __pycache__/
 *.py[cod]
 *$py.class
-.pytest_cache/
-.ruff_cache/
-.mypy_cache/
 
-# Local GUI/config state
-.p_*_gui_state.json
-.p_*_state.json
-*.log
+# Virtual environments and local environment files
+.venv/
+venv/
+env/
+*.env
 
-# Local data and generated outputs
+# Local IDE/editor state
+.vscode/
+.idea/
+
+# User-created project state
+microfractionation_project_config.json
+configs/
 data/
 output/
 outputs/
-Outputs/
-test_outputs/
-Post_run_analysis/
-*.tmp
+**/output/
+**/outputs/
 
-# OS/editor files
+# Generated run/config/log files
+*_config.json
+*.log
+
+# MZmine is downloaded by users and should not be committed
+mzmine_Windows_portable_4.7.8/
+.mzmine/
+
+# OS metadata
 .DS_Store
 Thumbs.db
-.vscode/*.log
 
-# Conda/pip build artifacts
-*.egg-info/
-build/
-dist/
+# Keep bundled synthetic examples tracked
+!example_data/
+!example_data/**
+!scripts/examples/
+!scripts/examples/**

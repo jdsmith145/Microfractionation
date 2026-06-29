@@ -8,6 +8,7 @@ import time
 import argparse
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -24,12 +25,29 @@ GENUS_RANK_QID = 'Q34740'
 FAMILY_RANK_QID = 'Q35409'
 
 MAX_RETRIES = 4
-BASE_SLEEP = 2.0
+BASE_SLEEP = 0.6
 REQUEST_TIMEOUT = 60
-BETWEEN_QUERIES_SLEEP = 1.2
+BETWEEN_QUERIES_SLEEP = 0.0
+DEFAULT_MAX_WORKERS = 4
+DEFAULT_TAXON_LOOKUP_LIMIT = 5
+DEFAULT_EXACT_LIMIT = 500
+DEFAULT_RANK_LIMIT = 1200
+DEFAULT_ANYWHERE_LIMIT = 300
+QUERY_LIMIT_KEYS = {
+    'taxon_lookup': DEFAULT_TAXON_LOOKUP_LIMIT,
+    'exact': DEFAULT_EXACT_LIMIT,
+    'rank': DEFAULT_RANK_LIMIT,
+    'anywhere': DEFAULT_ANYWHERE_LIMIT,
+}
 
 
 LOGGER = logging.getLogger("wikidata_dereplicator_core")
+
+
+def sleep_between_normal_queries() -> None:
+    """Optional normal-query throttle; retries still use explicit backoff."""
+    if BETWEEN_QUERIES_SLEEP > 0:
+        time.sleep(BETWEEN_QUERIES_SLEEP)
 
 
 @dataclass
@@ -47,6 +65,8 @@ class SearchSettings:
     search_name: str = ""
     merge_compounds: bool = False
     merge_smiles: bool = False
+    max_workers: int = DEFAULT_MAX_WORKERS
+    query_limits: Optional[Dict[str, Any]] = None
 
 
 def safe_str(value) -> str:
@@ -108,6 +128,39 @@ def quote_string(value: str) -> str:
     )
 
 
+def normalize_query_limit(value: Any, default: Optional[int]) -> Optional[int]:
+    """Return an integer SPARQL limit, or None when the query should be unlimited."""
+    if value is None:
+        return default
+    if isinstance(value, str):
+        text = value.strip().lower().replace('_', ' ')
+        if text in {'', 'default'}:
+            return default
+        if text in {'no limit', 'none', 'unlimited', 'all', '0'}:
+            return None
+        try:
+            parsed = int(float(text))
+        except ValueError as exc:
+            raise ValueError(f'Invalid Wikidata query limit: {value!r}. Use a positive number or No limit.') from exc
+    else:
+        parsed = int(value)
+    if parsed < 1:
+        return None
+    return parsed
+
+
+def normalize_query_limits(values: Optional[Dict[str, Any]]) -> Dict[str, Optional[int]]:
+    values = values or {}
+    return {
+        key: normalize_query_limit(values.get(key), default)
+        for key, default in QUERY_LIMIT_KEYS.items()
+    }
+
+
+def sparql_limit_clause(limit: Optional[int]) -> str:
+    return '' if limit is None else f'LIMIT {int(limit)}'
+
+
 def slugify_suffix(text: str) -> str:
     cleaned = re.sub(r'[^a-zA-Z0-9]+', '_', safe_str(text).strip().lower()).strip('_')
     return f'_{cleaned}' if cleaned else ''
@@ -159,15 +212,17 @@ def run_query(session: Any, query: str) -> Tuple[Optional[List[dict]], Optional[
     return None, 'unknown error'
 
 
-def resolve_taxon_qid(session: Any, scientific_name: str, rank_qid: Optional[str] = None) -> Tuple[Optional[str], Optional[str]]:
+def resolve_taxon_qid(session: Any, scientific_name: str, rank_qid: Optional[str] = None,
+                      limit: Optional[int] = DEFAULT_TAXON_LOOKUP_LIMIT) -> Tuple[Optional[str], Optional[str]]:
     name_esc = quote_string(scientific_name)
     rank_filter = f'?taxon wdt:P105 wd:{rank_qid} .' if rank_qid else ''
+    limit_clause = sparql_limit_clause(limit)
     query = f'''
     SELECT DISTINCT ?taxon WHERE {{
       ?taxon wdt:P225 "{name_esc}" .
       {rank_filter}
     }}
-    LIMIT 5
+    {limit_clause}
     '''
     hits, error = run_query(session, query)
     if hits is None:
@@ -177,14 +232,16 @@ def resolve_taxon_qid(session: Any, scientific_name: str, rank_qid: Optional[str
     return extract_qid(hits[0]['taxon']['value']), None
 
 
-def resolve_family_for_taxon(session: Any, taxon_qid: str) -> Tuple[Optional[Tuple[str, str]], Optional[str]]:
+def resolve_family_for_taxon(session: Any, taxon_qid: str,
+                             limit: Optional[int] = DEFAULT_TAXON_LOOKUP_LIMIT) -> Tuple[Optional[Tuple[str, str]], Optional[str]]:
+    limit_clause = sparql_limit_clause(limit)
     query = f'''
     SELECT DISTINCT ?family ?familyName WHERE {{
       wd:{taxon_qid} wdt:P171* ?family .
       ?family wdt:P105 wd:{FAMILY_RANK_QID} ;
               wdt:P225 ?familyName .
     }}
-    LIMIT 5
+    {limit_clause}
     '''
     hits, error = run_query(session, query)
     if hits is None:
@@ -196,9 +253,10 @@ def resolve_family_for_taxon(session: Any, taxon_qid: str) -> Tuple[Optional[Tup
     return (family_qid, family_name), None
 
 
-def build_exact_species_query(formula_sub: str, species_name: str) -> str:
+def build_exact_species_query(formula_sub: str, species_name: str, limit: Optional[int] = DEFAULT_EXACT_LIMIT) -> str:
     formula_esc = quote_string(formula_sub)
     species_esc = quote_string(species_name)
+    limit_clause = sparql_limit_clause(limit)
     return f'''
     SELECT DISTINCT ?compound ?compoundLabel ?taxon ?taxonName ?smiles ?inchi ?inchikey WHERE {{
       ?compound wdt:P274 "{formula_esc}" ;
@@ -212,12 +270,13 @@ def build_exact_species_query(formula_sub: str, species_name: str) -> str:
 
       SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en". }}
     }}
-    LIMIT 500
+    {limit_clause}
     '''
 
 
-def build_taxon_scope_query(formula_sub: str, ancestor_qid: str) -> str:
+def build_taxon_scope_query(formula_sub: str, ancestor_qid: str, limit: Optional[int] = DEFAULT_RANK_LIMIT) -> str:
     formula_esc = quote_string(formula_sub)
+    limit_clause = sparql_limit_clause(limit)
     return f'''
     SELECT DISTINCT ?compound ?compoundLabel ?taxon ?taxonName ?smiles ?inchi ?inchikey WHERE {{
       ?compound wdt:P274 "{formula_esc}" ;
@@ -231,12 +290,13 @@ def build_taxon_scope_query(formula_sub: str, ancestor_qid: str) -> str:
 
       SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en". }}
     }}
-    LIMIT 1200
+    {limit_clause}
     '''
 
 
-def build_anywhere_query(formula_sub: str) -> str:
+def build_anywhere_query(formula_sub: str, limit: Optional[int] = DEFAULT_ANYWHERE_LIMIT) -> str:
     formula_esc = quote_string(formula_sub)
+    limit_clause = sparql_limit_clause(limit)
     return f'''
     SELECT DISTINCT ?compound ?compoundLabel ?taxon ?taxonName ?smiles ?inchi ?inchikey WHERE {{
       ?compound wdt:P274 "{formula_esc}" .
@@ -249,7 +309,7 @@ def build_anywhere_query(formula_sub: str) -> str:
       OPTIONAL {{ ?compound wdt:P235 ?inchikey . }}
       SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en". }}
     }}
-    LIMIT 300
+    {limit_clause}
     '''
 
 
@@ -468,8 +528,11 @@ def save_csv_if_any(
 
 
 def run_search(data: pd.DataFrame, output_dir: str, search_suffix: str = '',
-               log_callback=None, merge_compounds: bool = False, merge_smiles: bool = False) -> Dict[str, str]:
+               log_callback=None, merge_compounds: bool = False, merge_smiles: bool = False,
+               max_workers: int = DEFAULT_MAX_WORKERS,
+               query_limits: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
     os.makedirs(output_dir, exist_ok=True)
+    limits = normalize_query_limits(query_limits)
 
     def log(message: str):
         if log_callback:
@@ -501,23 +564,52 @@ def run_search(data: pd.DataFrame, output_dir: str, search_suffix: str = '',
     except Exception as exc:
         raise ImportError("The requests package is required for Wikidata queries. Install it with: pip install requests") from exc
 
-    session = requests.Session()
-    session.requests_module = requests  # type: ignore[attr-defined]
     total_rows = len(data)
+    max_workers = max(1, int(max_workers or 1))
     merge_note = 'ON' if merge_compounds else 'OFF'
     smiles_merge_note = 'ON' if merge_smiles else 'OFF'
     log(f'Starting Wikidata search for {total_rows} row(s)...')
     log(f'Merge duplicate compounds by URL: {merge_note}')
     log(f'Merge structural duplicates by canonical SMILES: {smiles_merge_note}')
+    log(f'Parallel row queries: {max_workers} worker(s)')
+    limit_text = ', '.join(f'{key}={value if value is not None else "No limit"}' for key, value in limits.items())
+    log(f'Wikidata query limits: {limit_text}')
 
-    for idx, row in data.iterrows():
+    resolver_session = requests.Session()
+    resolver_session.requests_module = requests  # type: ignore[attr-defined]
+    unique_genera = sorted({safe_str(row.get('genus', '')) for _, row in data.iterrows() if safe_str(row.get('genus', ''))})
+    for genus in unique_genera:
+        if genus not in genus_qid_cache:
+            qid, note = resolve_taxon_qid(resolver_session, genus, rank_qid=GENUS_RANK_QID, limit=limits['taxon_lookup'])
+            genus_qid_cache[genus] = qid
+            genus_qid_note_cache[genus] = note or ''
+            sleep_between_normal_queries()
+        genus_qid = genus_qid_cache.get(genus) or ''
+        if genus_qid and genus_qid not in family_cache:
+            family_tuple, note = resolve_family_for_taxon(resolver_session, genus_qid, limit=limits['taxon_lookup'])
+            family_cache[genus_qid] = family_tuple
+            family_note_cache[genus_qid] = note or ''
+            sleep_between_normal_queries()
+
+    def process_row(idx: int, row: pd.Series) -> dict[str, Any]:
+        session = requests.Session()
+        session.requests_module = requests  # type: ignore[attr-defined]
+        row_logs: list[str] = []
+        local_exact: list[dict] = []
+        local_genus: list[dict] = []
+        local_family: list[dict] = []
+        local_anywhere: list[dict] = []
+
+        def row_log(message: str) -> None:
+            row_logs.append(message)
+
         genus = safe_str(row['genus'])
         species_only = normalize_species_only(genus, row.get('species', ''))
         species_name = build_species_name(genus, species_only)
         formula_plain = normalize_formula(row['formula'])
         formula_sub = to_subscript(formula_plain)
 
-        log(f'[{idx + 1}/{total_rows}] {species_name or genus} | {formula_plain}')
+        row_log(f'[{idx + 1}/{total_rows}] {species_name or genus} | {formula_plain}')
 
         exact_count = 0
         genus_count = 0
@@ -537,85 +629,73 @@ def run_search(data: pd.DataFrame, output_dir: str, search_suffix: str = '',
         family_qid = ''
         family_name = ''
 
-        if genus not in genus_qid_cache:
-            qid, note = resolve_taxon_qid(session, genus, rank_qid=GENUS_RANK_QID)
-            genus_qid_cache[genus] = qid
-            genus_qid_note_cache[genus] = note or ''
-            time.sleep(BETWEEN_QUERIES_SLEEP)
-
         genus_qid = genus_qid_cache.get(genus) or ''
         if not genus_qid:
             genus_note = genus_qid_note_cache.get(genus, '') or 'genus_qid_not_found'
             family_note = 'family_skipped_because_genus_qid_unavailable'
-            log(f'  -> Could not resolve genus QID for {genus}: {genus_note}')
+            row_log(f'  -> Could not resolve genus QID for {genus}: {genus_note}')
         else:
-            if genus_qid not in family_cache:
-                family_tuple, note = resolve_family_for_taxon(session, genus_qid)
-                family_cache[genus_qid] = family_tuple
-                family_note_cache[genus_qid] = note or ''
-                time.sleep(BETWEEN_QUERIES_SLEEP)
-
             family_tuple = family_cache.get(genus_qid)
             if not family_tuple:
                 family_note = family_note_cache.get(genus_qid, '') or 'family_not_found'
-                log(f'  -> Family could not be resolved from {genus}: {family_note}')
+                row_log(f'  -> Family could not be resolved from {genus}: {family_note}')
             else:
                 family_qid, family_name = family_tuple
-                log(f'  -> Resolved family: {family_name} ({family_qid})')
+                row_log(f'  -> Resolved family: {family_name} ({family_qid})')
 
         if species_only:
-            exact_hits, error = run_query(session, build_exact_species_query(formula_sub, species_name))
+            exact_hits, error = run_query(session, build_exact_species_query(formula_sub, species_name, limit=limits['exact']))
             if exact_hits is None:
                 exact_error = error or ''
-                log(f'  -> Exact-species query failed: {exact_error}')
+                row_log(f'  -> Exact-species query failed: {exact_error}')
             elif exact_hits:
                 exact_count = len(exact_hits)
-                log(f'  -> Exact-species hits: {exact_count}')
-                append_taxon_hits(exact_results, exact_hits, genus, species_name, family_name, formula_plain, 'exact_species')
+                row_log(f'  -> Exact-species hits: {exact_count}')
+                append_taxon_hits(local_exact, exact_hits, genus, species_name, family_name, formula_plain, 'exact_species')
             else:
-                log('  -> Exact-species hits: 0')
-            time.sleep(BETWEEN_QUERIES_SLEEP)
+                row_log('  -> Exact-species hits: 0')
+            sleep_between_normal_queries()
         else:
             exact_note = 'skipped_no_species_provided'
-            log('  -> Exact-species search skipped (species blank).')
+            row_log('  -> Exact-species search skipped (species blank).')
 
         if genus_qid:
-            genus_hits, error = run_query(session, build_taxon_scope_query(formula_sub, genus_qid))
+            genus_hits, error = run_query(session, build_taxon_scope_query(formula_sub, genus_qid, limit=limits['rank']))
             if genus_hits is None:
                 genus_error = error or ''
-                log(f'  -> Genus query failed: {genus_error}')
+                row_log(f'  -> Genus query failed: {genus_error}')
             elif genus_hits:
                 genus_count = len(genus_hits)
-                log(f'  -> Genus hits: {genus_count}')
-                append_taxon_hits(genus_results, genus_hits, genus, species_name, family_name, formula_plain, 'genus_or_descendant_taxon')
+                row_log(f'  -> Genus hits: {genus_count}')
+                append_taxon_hits(local_genus, genus_hits, genus, species_name, family_name, formula_plain, 'genus_or_descendant_taxon')
             else:
-                log('  -> Genus hits: 0')
-            time.sleep(BETWEEN_QUERIES_SLEEP)
+                row_log('  -> Genus hits: 0')
+            sleep_between_normal_queries()
 
             if family_qid:
-                family_hits, error = run_query(session, build_taxon_scope_query(formula_sub, family_qid))
+                family_hits, error = run_query(session, build_taxon_scope_query(formula_sub, family_qid, limit=limits['rank']))
                 if family_hits is None:
                     family_error = error or ''
-                    log(f'  -> Family query failed: {family_error}')
+                    row_log(f'  -> Family query failed: {family_error}')
                 elif family_hits:
                     family_count = len(family_hits)
-                    log(f'  -> Family hits: {family_count}')
-                    append_taxon_hits(family_results, family_hits, genus, species_name, family_name, formula_plain, 'family_or_descendant_taxon')
+                    row_log(f'  -> Family hits: {family_count}')
+                    append_taxon_hits(local_family, family_hits, genus, species_name, family_name, formula_plain, 'family_or_descendant_taxon')
                 else:
-                    log('  -> Family hits: 0')
-                time.sleep(BETWEEN_QUERIES_SLEEP)
+                    row_log('  -> Family hits: 0')
+                sleep_between_normal_queries()
 
-        anywhere_hits, error = run_query(session, build_anywhere_query(formula_sub))
+        anywhere_hits, error = run_query(session, build_anywhere_query(formula_sub, limit=limits['anywhere']))
         if anywhere_hits is None:
             anywhere_error = error or ''
-            log(f'  -> Formula-anywhere query failed: {anywhere_error}')
+            row_log(f'  -> Formula-anywhere query failed: {anywhere_error}')
         elif anywhere_hits:
             anywhere_count = len(anywhere_hits)
-            log(f'  -> Formula exists somewhere in Wikidata: {anywhere_count} hit(s)')
-            append_anywhere_hits(anywhere_results, anywhere_hits, genus, species_name, family_name, formula_plain)
+            row_log(f'  -> Formula exists somewhere in Wikidata: {anywhere_count} hit(s)')
+            append_anywhere_hits(local_anywhere, anywhere_hits, genus, species_name, family_name, formula_plain)
         else:
-            log('  -> Formula exists somewhere in Wikidata: 0 hits')
-        time.sleep(BETWEEN_QUERIES_SLEEP)
+            row_log('  -> Formula exists somewhere in Wikidata: 0 hits')
+        sleep_between_normal_queries()
 
         fatal_query_problem = any([exact_error, genus_error, family_error, anywhere_error])
         found_in_requested_scope = any([exact_count > 0, genus_count > 0, family_count > 0])
@@ -629,7 +709,7 @@ def run_search(data: pd.DataFrame, output_dir: str, search_suffix: str = '',
         else:
             interpretation = 'possibly_absent_from_wikidata'
 
-        summary_rows.append({
+        summary_row = {
             'Target Genus': genus,
             'Target Species': species_name,
             'Target Family': family_name,
@@ -642,9 +722,9 @@ def run_search(data: pd.DataFrame, output_dir: str, search_suffix: str = '',
             'Family Hits': family_count,
             'Formula Exists Anywhere in Wikidata': anywhere_count,
             'Interpretation': interpretation,
-        })
+        }
 
-        diagnostic_rows.append({
+        diagnostic_row = {
             'Target Genus': genus,
             'Target Species': species_name,
             'Target Family': family_name,
@@ -664,7 +744,47 @@ def run_search(data: pd.DataFrame, output_dir: str, search_suffix: str = '',
             'Genus Query Note': genus_note,
             'Family Query Note': family_note,
             'Interpretation': interpretation,
-        })
+        }
+
+        return {
+            "idx": idx,
+            "logs": row_logs,
+            "exact": local_exact,
+            "genus": local_genus,
+            "family": local_family,
+            "anywhere": local_anywhere,
+            "summary": summary_row,
+            "diagnostic": diagnostic_row,
+        }
+
+    row_results: dict[int, dict[str, Any]] = {}
+    if max_workers == 1 or total_rows <= 1:
+        for idx, row in data.iterrows():
+            result = process_row(int(idx), row)
+            row_results[int(idx)] = result
+            for message in result["logs"]:
+                log(message)
+    else:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(process_row, int(idx), row.copy()): int(idx) for idx, row in data.iterrows()}
+            completed = 0
+            for future in as_completed(futures):
+                idx = futures[future]
+                result = future.result()
+                row_results[idx] = result
+                completed += 1
+                log(f'Completed {completed}/{total_rows}: row {idx + 1}')
+                for message in result["logs"]:
+                    log(message)
+
+    for idx in sorted(row_results):
+        result = row_results[idx]
+        exact_results.extend(result["exact"])
+        genus_results.extend(result["genus"])
+        family_results.extend(result["family"])
+        anywhere_results.extend(result["anywhere"])
+        summary_rows.append(result["summary"])
+        diagnostic_rows.append(result["diagnostic"])
 
     exact_results = deduplicate_rows(exact_results, ['Target Formula', 'Compound URL', 'Taxon URL'])
     genus_results = deduplicate_rows(genus_results, ['Target Formula', 'Compound URL', 'Taxon URL'])
@@ -707,19 +827,30 @@ def build_manual_dataframe(rows: list[dict]) -> pd.DataFrame:
 
 
 def build_config_template() -> dict:
+    search = asdict(SearchSettings(output_dir='output', search_name='example', merge_compounds=False, merge_smiles=False, query_limits=QUERY_LIMIT_KEYS.copy()))
+    search['output_label'] = search['search_name']
     return {
         'input_mode': 'file',
         'file_input': asdict(FileInputSettings(path='data/molecules.xlsx')),
         'manual_rows': [
             {'genus': 'Hypericum', 'species': 'olympicum', 'formula': 'C18H16O7'},
         ],
-        'search': asdict(SearchSettings(output_dir='output', search_name='example', merge_compounds=False, merge_smiles=False)),
+        'search': search,
     }
+
+
+def normalize_search_settings(search_cfg: dict[str, Any]) -> dict[str, Any]:
+    """Normalize GUI config aliases before constructing SearchSettings."""
+    cleaned = dict(search_cfg or {})
+    if not cleaned.get('search_name') and cleaned.get('output_label'):
+        cleaned['search_name'] = cleaned.get('output_label')
+    allowed_keys = set(SearchSettings.__dataclass_fields__)
+    return {key: value for key, value in cleaned.items() if key in allowed_keys}
 
 
 def run_from_config(config: dict, *, log_callback=None) -> dict:
     search_cfg = config.get('search', {})
-    search = SearchSettings(**search_cfg)
+    search = SearchSettings(**normalize_search_settings(search_cfg))
     input_mode = str(config.get('input_mode', 'file')).lower()
     if input_mode == 'manual':
         data = build_manual_dataframe(config.get('manual_rows', []))
@@ -732,6 +863,8 @@ def run_from_config(config: dict, *, log_callback=None) -> dict:
         log_callback=log_callback,
         merge_compounds=search.merge_compounds,
         merge_smiles=search.merge_smiles,
+        max_workers=search.max_workers,
+        query_limits=search.query_limits,
     )
 
 
@@ -745,9 +878,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--species-column', default='species')
     parser.add_argument('--formula-column', default='formula')
     parser.add_argument('--output-dir', default='output')
-    parser.add_argument('--search-name', default='')
+    parser.add_argument('--output-label', '--search-name', dest='search_name', default='', help='Optional label added to output filenames.')
     parser.add_argument('--merge-compounds', action='store_true')
     parser.add_argument('--merge-smiles', action='store_true')
+    parser.add_argument('--max-workers', type=int, default=DEFAULT_MAX_WORKERS, help='Maximum parallel row searches. Default: 4.')
+    parser.add_argument('--taxon-lookup-limit', default=None, help='Maximum rows for genus/family lookup queries. Use "No limit" or 0 for no LIMIT clause.')
+    parser.add_argument('--exact-limit', default=None, help='Maximum rows for exact species formula queries. Use "No limit" or 0 for no LIMIT clause.')
+    parser.add_argument('--rank-limit', default=None, help='Maximum rows for genus/family formula queries. Use "No limit" or 0 for no LIMIT clause.')
+    parser.add_argument('--anywhere-limit', default=None, help='Maximum rows for formula-found-anywhere queries. Use "No limit" or 0 for no LIMIT clause.')
     parser.add_argument('--log-level', default='INFO', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'])
     return parser
 
@@ -782,6 +920,13 @@ def main(argv: list[str] | None = None) -> int:
         log_callback=LOGGER.info,
         merge_compounds=bool(args.merge_compounds),
         merge_smiles=bool(args.merge_smiles),
+        max_workers=int(args.max_workers),
+        query_limits={
+            'taxon_lookup': args.taxon_lookup_limit,
+            'exact': args.exact_limit,
+            'rank': args.rank_limit,
+            'anywhere': args.anywhere_limit,
+        },
     )
     print(json.dumps(paths, indent=2, ensure_ascii=False))
     return 0

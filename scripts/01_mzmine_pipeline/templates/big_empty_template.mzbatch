@@ -500,7 +500,7 @@
             <name_pattern>*Aligned feature list gaps subtracted dup corr PEARSON r greq 0.85 dp greq 5 peak</name_pattern>
         </parameter>
         <parameter name="Filename">
-            <current_file>OUTPUT_PLACEHOLDER.csv</current_file>
+            <current_file>placeholder.csv</current_file>
         </parameter>
         <parameter name="Field separator">,</parameter>
         <parameter name="Identification separator">;</parameter>

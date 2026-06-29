@@ -1,0 +1,4 @@
+fraction,row ID,row m/z,row retention time,Peak area,matched_mz,matched_rt
+1,1,329.102,7.12,120000,329.1021,7.15
+2,2,322.1075,8.08,95000,322.1076,8.09
+2,3,334.1074,10.85,45000,334.1076,10.82

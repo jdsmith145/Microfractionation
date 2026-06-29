@@ -1,0 +1,10 @@
+metric,value,percent_of_total_input,percent_of_previous_step
+Total input features,4,100.0,100.0
+Above peak-area threshold,3,75.0,75.0
+Assigned to collected fractions,3,75.0,100.0
+Collected and present in at least one target plant,3,75.0,100.0
+Collected and present in highest response group,1,25.0,33.33
+Demo_plant_A_features_present,2,50.0,
+Demo_plant_A_features_absent,1,25.0,
+Demo_plant_B_features_present,2,50.0,
+Demo_plant_B_features_absent,1,25.0,

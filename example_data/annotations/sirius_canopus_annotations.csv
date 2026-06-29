@@ -1,0 +1,4 @@
+formulaRank,molecularFormula,adduct,precursorFormula,NPC#pathway,NPC#superclass,NPC#class,ClassyFire#superclass,ClassyFire#class,ionMass,retentionTimeInMinutes,mappingFeatureId
+1,C15H18O2,[M + H]+,C15H19O2+,Terpenoids,Sesquiterpenoids,Eudesmane sesquiterpenoids,Lipids and lipid-like molecules,Prenol lipids,231.138,0.593,101
+1,C9H25N5,[M + Na]+,C9H25N5Na+,Alkaloids,Ornithine alkaloids,Polyamines,Organic nitrogen compounds,Organonitrogen compounds,226.2,0.876,102
+1,C7H6O3,[M - H]-,C7H5O3-,Shikimates and Phenylpropanoids,Phenolic acids,Hydroxybenzoic acids,Benzenoids,Benzene and substituted derivatives,137.024,2.42,103

@@ -36,6 +36,8 @@ The GUI visualization tab can load previous result CSV files and display molecul
 python p_03_01_wikidata_gui.py
 ```
 
+In the GUI, **Output file label** is only a run label used in filenames. It is not the compound, formula, or taxon being searched. **Parallel searches** controls how many input rows are queried at the same time. The default value of `4` is usually a good balance; use `1` or `2` if Wikidata returns throttling or retry messages.
+
 ## CLI examples
 
 Create a template config:
@@ -53,11 +55,14 @@ python p_03_00_wikidata_core.py `
   --species-column species `
   --formula-column formula `
   --output-dir ..\examples\03_wikidata\output `
+  --output-label example_run `
+  --max-workers 4 `
   --merge-compounds --merge-smiles
 ```
 
 ## Common issues
 
 - This script requires internet access for Wikidata SPARQL queries.
+- Normal successful queries are not deliberately delayed. Retry/backoff handling is still used for timeouts, HTTP errors, and Wikidata throttling.
 - RDKit is optional for searching but needed for structure previews in the GUI.
 - Formula formatting should be plain text such as `C21H22NO4`, not subscripted formula text.

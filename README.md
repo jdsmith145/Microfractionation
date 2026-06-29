@@ -1,79 +1,87 @@
-# Microfractionation computational workflow
+# Microfractionation Workflow Package
 
-This repository contains the Python workflow used to connect plant or extract bioactivity, HPLC microfractionation, MZmine feature tables, Wikidata dereplication, fraction prediction, and HRMS feature-table exploration.
+Open `scripts/p_microfractionation_launcher.py` to start the workflow launcher. The launcher creates `microfractionation_project_config.json` on first use, validates shared inputs, creates output folders, and opens the focused workflow tools.
 
-The scripts are organized as numbered steps. Each step has a core script for reproducible command-line or notebook use and, where useful, a CustomTkinter GUI for interactive work.
+This package contains the current microfractionation workflow. It no longer includes the former Activity overview or HRMS exploration modules; activity/intensity files are used where they directly support the two-sided plot and fraction predictor.
 
-## Workflow steps
+The public package is distributed without project-specific configs, real project input data, or generated outputs. Small synthetic examples are included under `example_data/` and `scripts/examples/`. The MZmine batch templates are retained under `scripts/01_mzmine_pipeline/templates/`.
 
-| Step | Folder | Purpose |
-| --- | --- | --- |
-| 00 | `00_plant_activity` | Plot crude extract or plant bioactivity from replicate measurements and classify active samples. |
-| 01 | `01_mzmine_pipeline` | Prepare MZmine batches, run MZmine headlessly, and match fraction features in one guided workflow. This script contains the former standalone batch-preparation and matching stages. |
-| 02 | `02_two_sided_plot` | Plot HPLC chromatogram, fraction feature intensity, and bioactivity in one figure. |
-| 03 | `03_wikidata` | Search Wikidata for compounds by molecular formula and taxonomic scope. |
-| 04 | `04_fraction_predictor` | Predict HPLC fractions from UPLC retention time and map fraction response values back to LC-MS features. |
-| 05 | `05_HRMS_exploration` | Explore annotated HRMS feature tables and summarize molecular classes across samples. |
 
 ## Installation
 
-Conda is recommended because RDKit is most reliable from conda-forge:
+The recommended setup uses Conda because RDKit is most reliable from conda-forge:
 
 ```powershell
 conda env create -f environment.yml
 conda activate microfractionation
 ```
 
-The Conda environment uses Python 3.11 for reproducibility. It installs the scientific stack from conda-forge and installs `customtkinter` with pip inside the same environment, because `customtkinter` is not available as a standard conda-forge package on all platforms.
-
-For a pip-only environment:
+For a pip-only setup, use:
 
 ```powershell
 python -m pip install -r requirements.txt
 ```
 
-RDKit is optional for the core Wikidata search but required for structure previews in the Wikidata GUI:
+RDKit is optional for the core Wikidata search, but required for molecule structure previews in the Wikidata GUI. If it is missing from a pip-only setup, install it with Conda when possible:
 
 ```powershell
 conda install -c conda-forge rdkit
 ```
 
-## Running the workflow
+## Platform Note
 
-Each folder contains its own `README.md` with exact input columns, outputs, GUI command, and CLI examples. In general:
+The workflow GUIs are Python/CustomTkinter based, but the automated MZmine runner is currently documented for Windows because it expects the Windows portable MZmine folder and `mzmine_console.exe`. Linux/macOS users can still use the Python table/plotting steps, but the MZmine executable path and portable-folder instructions must be adapted to their local MZmine installation.
 
-```powershell
-python 00_plant_activity/p_00_01_plant_bioactivity_gui.py
-python 01_mzmine_pipeline/p_01_01_mzmine_pipeline_gui.py
-python 02_two_sided_plot/p_02_01_two_sided_plot_gui.py
-python 03_wikidata/p_03_01_wikidata_gui.py
-python 04_fraction_predictor/p_04_01_fraction_predictor_gui.py
-python 05_HRMS_exploration/p_05_01_hrms_exploration_gui.py
-```
+## First Setup: Install MZmine 4.7.8 Portable
 
-Script 01 is the only user-facing MZmine pipeline step. It includes batch preparation, headless MZmine execution, output checks, and fraction-feature matching so users do not need to choose between separate tools.
+MZmine is required for the batch runner step, but it is not bundled with this repository. Before running the MZmine pipeline:
 
-Core scripts can be run from the command line. For example:
+1. Open the official MZmine 4.7.8 release page: https://github.com/mzmine/mzmine/releases/tag/v4.7.8
+2. Download the Windows portable package.
+3. Unzip it directly inside the `microfractionation` folder.
+4. Keep the folder name as `mzmine_Windows_portable_4.7.8`.
+5. Confirm that this file exists: `mzmine_Windows_portable_4.7.8/mzmine_console.exe`.
 
-```powershell
-python 01_mzmine_pipeline/p_01_00_mzmine_pipeline_core.py `
-  --config examples/01_mzmine_pipeline/mzmine_pipeline_config.json `
-  --dry-run
-```
+The launcher has an `Open MZmine 4.7.8 download page` button and a `Check MZmine` button. Missing MZmine is shown as a setup warning because the other screens can still be configured, but the MZmine Runner cannot run until `mzmine_console.exe` is available.
 
-## Inputs and outputs
+## Workflow At A Glance
 
-The most important reproducibility rule is that every table must contain the expected columns. The per-step READMEs define the required columns explicitly. Most scripts accept CSV and Excel inputs; mzML inputs are used where chromatograms or MZmine batch files are involved.
+1. Raw HPLC-MS mzML files are used to create MZmine batch files.
+2. MZmine writes a complete feature table and fraction feature tables.
+3. Feature filtering combines the complete table with fraction CSV files and writes a filtered HPLC feature table.
+4. The filtered HPLC feature table feeds the two-sided plot and the fraction predictor.
+5. The main HRMS feature table, annotations, and activity/intensity files feed the fraction predictor.
+6. Formula/taxon input feeds Wikidata dereplication.
 
-Synthetic example files are provided under `examples/`. These are artificial and intended only to document table formats and test basic command-line behavior. They do not represent the research dataset.
+## Main Inputs And Outputs
 
-Additional cross-workflow references:
+| Workflow step | Main input | Main output |
+| --- | --- | --- |
+| Launcher | shared project files and sample records | `microfractionation_project_config.json` and module handoff config |
+| Batch setup | HPLC mzML sample/blank injections and MZmine templates | configured `.mzbatch` files |
+| MZmine runner | configured `.mzbatch` files | complete feature table and `frac_*.csv` files |
+| Feature filtering | complete table plus fraction CSVs | `<sample>_filtered_feature_table.csv` and `<sample>_fraction_purity_estimates.csv` |
+| Two-sided plot | filtered HPLC table, chromatogram mzML, activity files | SVG/PNG figure and plotted data CSV |
+| Wikidata | formula/taxon list | Wikidata hit tables and structure visualization |
+| Fraction predictor | main feature table, filtered HPLC table, annotations, activity files | filtered and full feature tables with fraction/activity columns |
 
-- `docs/input_schema_reference.md` summarizes required columns across all steps.
-- `docs/testing.md` lists smoke checks for syntax, command-line help, and Script 01 dry-run validation.
+## Clean State
 
-The repository intentionally does not include real research data. Files under `examples/` are synthetic schema examples. MZmine templates under `01_mzmine_pipeline/templates/` are starting points; Script 01 rewrites raw-data paths and export paths during batch preparation.
+- No real project input data are bundled in the public package; only small synthetic example files are included.
+- No saved configs are bundled; `microfractionation_project_config.json` is created by the launcher on first use.
+- No generated output files are bundled.
+- MZmine batch templates are bundled in `scripts/01_mzmine_pipeline/templates/`.
+- Synthetic example files are available under `example_data/` and `scripts/examples/`. Users should create local `data/`, `configs/`, and `output/` folders for their own analyses, or let the launcher create the needed project paths.
 
-## Repository metadata
+The workflow graph in the launcher is static. It explains data flow and file expectations; it is not a Snakemake-style execution engine yet.
 
-Code is licensed under MIT. Documentation and synthetic examples are licensed under CC-BY-4.0. See `LICENSE`, `LICENSE-docs-data.md`, and `CITATION.cff`.
+## Authors
+
+Joshua David Smith1,&, Erik Bouchal1,2,&, Zdeněk Knejzlík1, Martin Dračínský1, Tito Damiani1, Roman Bushuiev1,3, Eva Tikalová1, Eva Tloušťová1, Marcela Pávová1, Jan Hodek1, Artur Jasanský1, Matouš Soldát1,2, Alžběta Kadlecová1, Vendula Tvrdoňová Stillerová1, Pavel Šácha1, Tomáš Pluskal1*, Téo Hebra1*
+
+1 Institute of Organic Chemistry and Biochemistry of the Czech Academy of Sciences, Prague, Czechia  
+2 Charles University, Faculty of Science, Prague, Czechia  
+3 Robotics and Cybernetics, Czech Technical University, Prague, Czechia
+
+& These authors contributed equally to this work.  
+* To whom correspondence should be addressed.
