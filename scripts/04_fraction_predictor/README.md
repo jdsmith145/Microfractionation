@@ -79,9 +79,10 @@ For feature-order anchor-pair mapping, use the `Alignment` tab when the HRMS tab
 
 ## CLI example
 
+Save a configuration from the GUI or prepare a JSON config with the same fields, then run:
+
 ```powershell
-python p_04_00_fraction_predictor_core.py `
-  --config ..\examples\04_fraction_predictor\fraction_predictor_config.json
+python p_04_00_fraction_predictor_core.py --config path\to\fraction_predictor_config.json
 ```
 
 ## Common issues

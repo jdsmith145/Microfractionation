@@ -67,4 +67,4 @@ python 01_mzmine_pipeline/p_01_00_mzmine_pipeline_core.py `
 
 The most important reproducibility rule is that every table must contain the expected columns. The per-step READMEs define the required columns explicitly. Most scripts accept CSV and Excel inputs; mzML inputs are used where chromatograms or MZmine batch files are involved.
 
-The public package does not include project-specific input data, saved configs, or generated outputs. It does include small synthetic example files under `../example_data/` so users can inspect expected file layouts. Per-step READMEs describe the expected table columns and file roles.
+Small synthetic example files are available under `../example_data/` so users can inspect expected file layouts. Per-step READMEs describe the expected table columns and file roles.
