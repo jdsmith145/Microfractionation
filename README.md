@@ -2,8 +2,6 @@
 
 Open `scripts/p_microfractionation_launcher.py` to start the workflow launcher. The launcher creates `microfractionation_project_config.json` on first use, validates shared inputs, creates output folders, and opens the focused workflow tools.
 
-This package contains the current microfractionation workflow. It no longer includes the former Activity overview or HRMS exploration modules; activity/intensity files are used where they directly support the two-sided plot and fraction predictor.
-
 The public package is distributed without project-specific configs, real project input data, or generated outputs. Small synthetic examples are included under `example_data/` and `scripts/examples/`. The MZmine batch templates are retained under `scripts/01_mzmine_pipeline/templates/`.
 
 
@@ -49,9 +47,9 @@ The launcher has an `Open MZmine 4.7.8 download page` button and a `Check MZmine
 1. Raw HPLC-MS mzML files are used to create MZmine batch files.
 2. MZmine writes a complete feature table and fraction feature tables.
 3. Feature filtering combines the complete table with fraction CSV files and writes a filtered HPLC feature table.
-4. The filtered HPLC feature table feeds the two-sided plot and the fraction predictor.
-5. The main HRMS feature table, annotations, and activity/intensity files feed the fraction predictor.
-6. Formula/taxon input feeds Wikidata dereplication.
+4. The filtered HPLC feature table is used with activity/intensity data for the two-sided plot.
+5. Based on two-sided plot prioritization, selected features from fractions can be dereplicated with Wikidata.
+6. The fraction prediction workflow is used on prioritized samples to rank HRMS features of interest.
 
 ## Main Inputs And Outputs
 
@@ -63,7 +61,7 @@ The launcher has an `Open MZmine 4.7.8 download page` button and a `Check MZmine
 | Feature filtering | complete table plus fraction CSVs | `<sample>_filtered_feature_table.csv` and `<sample>_fraction_purity_estimates.csv` |
 | Two-sided plot | filtered HPLC table, chromatogram mzML, activity files | SVG/PNG figure and plotted data CSV |
 | Wikidata | formula/taxon list | Wikidata hit tables and structure visualization |
-| Fraction predictor | main feature table, filtered HPLC table, annotations, activity files | filtered and full feature tables with fraction/activity columns |
+| Fraction predictor | HRMS feature table, filtered HPLC table, annotations, activity files | fully annotated HRMS feature table with fraction/activity columns |
 
 ## Clean State
 

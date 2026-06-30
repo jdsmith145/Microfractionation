@@ -11,7 +11,7 @@ This folder contains tiny example inputs that show the expected shape of each da
 ## Activity/intensity tables
 
 - `activity/plate_reader/ruta_corsica_107_rep_1_8x12_plate.csv` / `.xlsx`: direct 96-well plate-reader layout. Rows are A-H and columns are 1-12. In this example, H11 is a low positive-control well and H12 is intentionally high signal; users should select only the wells that are controls for their assay.
-- `activity/fraction_table/macleaya_microcarpa_84_activity_table.csv` / `.xlsx`: older fraction-by-row activity/intensity layout. Each fraction has replicate columns; the shared positive-control mean can be entered once in the control column and left blank below.
+- `activity/fraction_table/macleaya_microcarpa_84_activity_table.csv` / `.xlsx`: fraction-by-row activity/intensity table. Each fraction has replicate columns; the shared positive-control mean can be entered once in the control column and left blank below.
 
 ## MZmine and fraction matching
 

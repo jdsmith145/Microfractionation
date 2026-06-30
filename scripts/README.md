@@ -2,8 +2,6 @@
 
 This repository contains the active Python workflow used to connect HPLC microfractionation, MZmine feature tables, two-sided visualization, Wikidata dereplication, and fraction prediction.
 
-The former Activity overview and HRMS exploration modules were removed from this workflow copy. Activity/intensity data are still accepted by the two-sided plot and fraction predictor where they are part of the microfractionation analysis.
-
 ## Workflow steps
 
 | Step | Folder | Purpose |

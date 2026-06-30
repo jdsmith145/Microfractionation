@@ -89,6 +89,3 @@ python p_01_00_mzmine_pipeline_core.py --config mzmine_pipeline_config.json --st
 - Target m/z values can be entered as a comma-, semicolon-, space-, or newline-separated list. The purity estimate table is based on feature-table peak areas. It is useful for prioritization but should not be interpreted as chemical purity because different compounds can ionize with different efficiency.
 - If the fraction batch creates files named `OUTPUT_PLACEHOLDER.csv`, regenerate the fraction batch with the current Batch setup tool. The current tool forces fraction exports to `frac_01.csv`, `frac_02.csv`, and so on.
 
-## Archived legacy GUI
-
-The former all-in-one GUI is archived at `archived/p_01_01_mzmine_pipeline_gui.py`. The launcher and documentation now use the three focused GUIs above.

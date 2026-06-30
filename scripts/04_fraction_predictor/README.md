@@ -26,7 +26,7 @@ When a matched-RT pairs table also contains the main feature-table ID, select it
 
 This is optional. It does not change the fitted regression, and `predicted_hplc_rt` remains in the report so the measured and predicted values can be compared. A feature ID must map to one unambiguous HPLC RT in the pairs table.
 
-The core still accepts older `equation` and `runtime_scale` configs for compatibility, but these are no longer recommended as normal GUI choices.
+The GUI offers two calibration choices: gradient calibration with matched RT pairs and feature-order anchor pairs for cases where retention-time equations are not defensible.
 
 Feature-order anchor-pair table requirements, when imported from CSV/Excel:
 
@@ -61,8 +61,7 @@ Main CSV outputs:
 
 Intermediate debug outputs:
 
-- By default, the script no longer writes the older intermediate tables `01_filtered_feature_table.csv`, `02_fraction_windows.csv`, `03_features_with_fraction_predictions.csv`, and `04_features_with_bioactivity.csv`.
-- In the GUI, enable **Write debug tables** to write those diagnostic tables into `Debug_exports/`.
+- Diagnostic intermediate tables are written only when **Write debug tables** is enabled in the GUI. They are saved into `Debug_exports/`.
 - In a JSON config, set `"debug_exports": true` for the same behavior.
 
 Post-run analysis:

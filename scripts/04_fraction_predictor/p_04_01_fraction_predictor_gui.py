@@ -2386,7 +2386,7 @@ def main() -> int:
     ctk.CTkLabel(header, text="Fraction predictor", font=font_header, text_color=colors["text"], anchor="w").grid(row=0, column=0, sticky="w")
     ctk.CTkLabel(
         header,
-        text="Infer where low-abundance LC-MS features would elute in collected HPLC fractions, then connect those features to fraction activity/intensity data. The launcher already supplies shared files such as the main feature table, SIRIUS/CANOPUS annotations, sample peak-area column, and standard output folders. In this screen, select the sample, confirm annotation matching, choose the calibration strategy, add plant response files, and set response groups.",
+        text="Infer where low-abundance LC-MS features would elute in collected HPLC fractions, then connect those features to fraction activity/intensity data. The launcher already supplies shared files such as the HRMS feature table, SIRIUS/CANOPUS annotations, sample peak-area column, and standard output folders. In this screen, select the sample, confirm annotation matching, choose the calibration strategy, add plant response files, and set response groups.",
         font=font_subtitle,
         text_color=colors["muted"],
         anchor="w",

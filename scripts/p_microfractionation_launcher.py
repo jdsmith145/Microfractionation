@@ -611,7 +611,7 @@ class Launcher(ctk.CTk):
             ),
             (
                 "Fraction predictor",
-                "main feature table + annotations + activity files",
+                "HRMS feature table + annotations + activity files",
                 "final feature table with fraction/activity columns",
                 "prioritization",
             ),
