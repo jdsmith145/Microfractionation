@@ -42,7 +42,7 @@ The normal entry point is the launcher in the parent `scripts` folder:
 python p_microfractionation_launcher.py
 ```
 
-Focused GUIs can still be opened directly when needed:
+The launcher is the recommended entry point. Focused GUIs can still be opened directly for troubleshooting or advanced use:
 
 ```powershell
 python 01_mzmine_pipeline/p_01_01_batch_setup_gui.py
@@ -53,7 +53,7 @@ python 03_wikidata/p_03_01_wikidata_gui.py
 python 04_fraction_predictor/p_04_01_fraction_predictor_gui.py
 ```
 
-Script 01 is split into three focused MZmine screens because this part has three different jobs: batch setup, MZmine execution, and feature filtering. The screens share launcher/sample paths so users do not need to re-enter the same files.
+Script 01 is split into three focused MZmine screens because this part has three different jobs: batch setup, MZmine execution, and feature filtering. When opened from the launcher, the screens share sample paths so users do not need to re-enter the same files.
 
 Core scripts can be run from the command line once a JSON config has been created in the launcher or saved from a focused GUI. For example:
 
@@ -67,15 +67,4 @@ python 01_mzmine_pipeline/p_01_00_mzmine_pipeline_core.py `
 
 The most important reproducibility rule is that every table must contain the expected columns. The per-step READMEs define the required columns explicitly. Most scripts accept CSV and Excel inputs; mzML inputs are used where chromatograms or MZmine batch files are involved.
 
-The public package does not include project-specific input data, saved configs, or generated outputs. It does include small synthetic example files under `../example_data/` and `examples/` so users can inspect expected file layouts. Per-step READMEs describe the expected table columns and file roles.
-
-## Authors
-
-Joshua David Smith1,&, Erik Bouchal1,2,&, Zdeněk Knejzlík1, Martin Dračínský1, Tito Damiani1, Roman Bushuiev1,3, Eva Tikalová1, Eva Tloušťová1, Marcela Pávová1, Jan Hodek1, Artur Jasanský1, Matouš Soldát1,2, Alžběta Kadlecová1, Vendula Tvrdoňová Stillerová1, Pavel Šácha1, Tomáš Pluskal1*, Téo Hebra1*
-
-1 Institute of Organic Chemistry and Biochemistry of the Czech Academy of Sciences, Prague, Czechia  
-2 Charles University, Faculty of Science, Prague, Czechia  
-3 Robotics and Cybernetics, Czech Technical University, Prague, Czechia
-
-& These authors contributed equally to this work.  
-* To whom correspondence should be addressed.
+The public package does not include project-specific input data, saved configs, or generated outputs. It does include small synthetic example files under `../example_data/` so users can inspect expected file layouts. Per-step READMEs describe the expected table columns and file roles.

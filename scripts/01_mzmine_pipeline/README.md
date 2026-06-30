@@ -47,13 +47,15 @@ Optional:
 
 ## GUI
 
+Open this step from the main launcher when possible. Direct GUI launch is mainly for troubleshooting or advanced use.
+
 ```powershell
 python p_01_01_batch_setup_gui.py
 python p_01_02_mzmine_runner_gui.py
 python p_01_03_feature_filter_gui.py
 ```
 
-Recommended GUI workflow:
+Direct GUI workflow:
 
 1. Open **Batch setup**, select the raw mzML files and templates, run setup, and save the JSON config.
 2. Open **MZmine runner**, load the same config, choose the MZmine console settings, and run the complete and/or fraction batches.

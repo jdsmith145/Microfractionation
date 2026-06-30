@@ -55,7 +55,7 @@ In normal use, start the main launcher first:
 python p_microfractionation_launcher.py
 ```
 
-Then choose the sample in the launcher and open **Two-sided plot**. Inherited paths are hidden by default but can be opened under **Inherited paths and fraction windows**.
+Then choose the sample in the launcher and open **Two-sided plot**. Project paths are hidden by default but can be opened under **Project files and output**.
 
 ## CLI example
 

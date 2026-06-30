@@ -1,6 +1,0 @@
-plant,presence,bioactivity_group_clean,feature_count
-Demo plant A,absent,above 50,1
-Demo plant A,present,below 20,2
-Demo plant B,absent,below 20,1
-Demo plant B,present,20 to 50,1
-Demo plant B,present,above 50,1

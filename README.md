@@ -2,7 +2,7 @@
 
 Open `scripts/p_microfractionation_launcher.py` to start the workflow launcher. The launcher creates `microfractionation_project_config.json` on first use, validates shared inputs, creates output folders, and opens the focused workflow tools.
 
-The public package is distributed without project-specific configs, real project input data, or generated outputs. Small synthetic examples are included under `example_data/` and `scripts/examples/`. The MZmine batch templates are retained under `scripts/01_mzmine_pipeline/templates/`.
+The public package is distributed without project-specific configs, real project input data, or generated outputs. Small synthetic examples are included under `example_data/`. The MZmine batch templates are retained under `scripts/01_mzmine_pipeline/templates/`.
 
 
 ## Installation
@@ -69,17 +69,17 @@ The launcher has an `Open MZmine 4.7.8 download page` button and a `Check MZmine
 - No saved configs are bundled; `microfractionation_project_config.json` is created by the launcher on first use.
 - No generated output files are bundled.
 - MZmine batch templates are bundled in `scripts/01_mzmine_pipeline/templates/`.
-- Synthetic example files are available under `example_data/` and `scripts/examples/`. Users should create local `data/`, `configs/`, and `output/` folders for their own analyses, or let the launcher create the needed project paths.
+- Synthetic example files are available under `example_data/`. Users should create local `data/`, `configs/`, and `output/` folders for their own analyses, or let the launcher create the needed project paths.
 
 The workflow graph in the launcher is static. It explains data flow and file expectations; it is not a Snakemake-style execution engine yet.
 
 ## Authors
 
-Joshua David Smith1,&, Erik Bouchal1,2,&, Zdeněk Knejzlík1, Martin Dračínský1, Tito Damiani1, Roman Bushuiev1,3, Eva Tikalová1, Eva Tloušťová1, Marcela Pávová1, Jan Hodek1, Artur Jasanský1, Matouš Soldát1,2, Alžběta Kadlecová1, Vendula Tvrdoňová Stillerová1, Pavel Šácha1, Tomáš Pluskal1*, Téo Hebra1*
+Joshua David Smith1,&, Erik Bouchal1,2,&, Zdeněk Knejzlík1, Martin Dračínský1, Tito Damiani1, Roman Bushuiev1,3, Eva Tikalová1, Eva Tloušťová1, Marcela Pávová1, Jan Hodek1, Artur Jasanský1, Matouš Soldát1,2, Alžběta Kadlecová1, Vendula Tvrdoňová Stillerová1, Pavel Šácha1, Tomáš Pluskal1\*, Téo Hebra1\*
 
 1 Institute of Organic Chemistry and Biochemistry of the Czech Academy of Sciences, Prague, Czechia  
 2 Charles University, Faculty of Science, Prague, Czechia  
 3 Robotics and Cybernetics, Czech Technical University, Prague, Czechia
 
 & These authors contributed equally to this work.  
-* To whom correspondence should be addressed.
+\* To whom correspondence should be addressed.

@@ -5,7 +5,6 @@ This public package is intended for GitHub/publication distribution.
 Included:
 
 - `example_data/`: small synthetic input examples that show expected table layouts.
-- `scripts/examples/`: script-specific synthetic examples, example configs, and expected-output notes.
 - `scripts/01_mzmine_pipeline/templates/`: MZmine batch templates required by the batch setup step.
 
 Not included:

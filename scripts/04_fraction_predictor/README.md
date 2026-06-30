@@ -26,7 +26,6 @@ When a matched-RT pairs table also contains the main feature-table ID, select it
 
 This is optional. It does not change the fitted regression, and `predicted_hplc_rt` remains in the report so the measured and predicted values can be compared. A feature ID must map to one unambiguous HPLC RT in the pairs table.
 
-The GUI offers two calibration choices: gradient calibration with matched RT pairs and feature-order anchor pairs for cases where retention-time equations are not defensible.
 
 Feature-order anchor-pair table requirements, when imported from CSV/Excel:
 
@@ -56,7 +55,7 @@ Main CSV outputs:
 
 - `final_feature_table_with_fraction_activity.csv`: the main user-facing table for features that passed the selected peak-area threshold. It preserves the filtered original feature-table columns, adds selected annotation columns near the feature identity/RT columns, and appends predicted fraction, candidate-fraction interval, activity/intensity group, and interpretation columns. When known calibration feature RTs are enabled, it also includes `Part of calibration` and `Real RT`; those real RTs determine the corresponding fraction assignments.
 - `full_feature_table_with_fraction_activity.csv`: the complete original feature table with the same report columns appended. Rows below the peak-area threshold are retained, but prediction/activity fields are empty because they were not processed by the filtering step.
-- one response-by-fraction CSV per plant. Existing filenames use `bioactivity_by_fraction` for compatibility.
+- one response-by-fraction CSV per plant/sample.
 - `run_summary.json`.
 
 Intermediate debug outputs:

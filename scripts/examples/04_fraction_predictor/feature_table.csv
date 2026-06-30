@@ -1,6 +1,0 @@
-row ID,row m/z,row retention time,Demo plant A Peak area,Demo plant B Peak area,annotation
-1,100.0000,1.00,15000,0,Feature 1
-2,150.0000,2.00,22000,25000,Feature 2
-3,200.0000,3.00,0,30000,Feature 3
-4,250.0000,4.00,100,200,Below threshold
-

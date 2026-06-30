@@ -2554,7 +2554,7 @@ def main() -> int:
     id_label_frame, _id_widget = labeled_widget(card, "ID column", combo_id_col, 1, 0, help_text="Feature identifier column used for outputs and for matching prediction results back to the shared SIRIUS/CANOPUS annotation table. If missing, the core creates a row-number ID, but a real stable ID is better.")
     select_id_button = make_button(card, "Select", lambda: select_column(var_id_col, feature_columns, "Select ID column", after=refresh_feature_column_widgets), width=74)
     select_id_button.grid(row=1, column=4, sticky="ew", padx=(0, 8), pady=7)
-    mz_label_frame, _mz_widget = labeled_widget(card, "m/z column", combo_mz_col, 1, 2, help_text="Column containing feature m/z values. It is retained in output tables for interpretation and notebook QC.")
+    mz_label_frame, _mz_widget = labeled_widget(card, "m/z column", combo_mz_col, 1, 2, help_text="Column containing feature m/z values. It is retained in output tables for interpretation and quality control.")
     select_mz_button = make_button(card, "Select", lambda: select_column(var_mz_col, feature_columns, "Select m/z column", after=refresh_feature_order_lists), width=74)
     select_mz_button.grid(row=1, column=5, sticky="ew", pady=7)
     rt_label_frame, _rt_widget = labeled_widget(card, "UPLC / HRMS RT column", combo_rt_col, 2, 0, help_text="Column containing retention time in the HRMS feature table. Gradient calibration uses this value to predict HPLC RT. Feature-order anchor pairs use it only to place features between selected anchors.")
@@ -2979,12 +2979,9 @@ def main() -> int:
         "For each plant card, the script reads an activity/intensity table with fraction numbers, measured average values, and positive-control values when normalization is needed. It can keep the values as signal, scale them to relative signal, or convert them to derived activity, then transfers the mapped fraction result back onto features predicted to appear in those fractions.",
         "The main output is one final CSV table: original feature columns that pass the area filter, selected annotation columns near the feature identity/RT columns, and fraction/activity interpretation columns. Per-plant activity-by-fraction tables, post-run figures, and run_summary.json are also written. Older intermediate CSV tables are now written only when Write debug tables is enabled.",
         "After each run, the Post_run_analysis folder gives a quick overview for human review. It contains compact summary CSV files plus pastel PNG and SVG figures: a feature-prioritization funnel, feature counts per predicted fraction, and plant-specific presence/activity summaries. Use these first to understand whether the run produced biologically useful contrasts before reading every feature row.",
-        "The notebook is the analysis and visualization companion for this core. Use the GUI or JSON config to create a run, then open the notebook to inspect calibration quality, feature counts per fraction, plant-specific activity plots, group counts, and top features. The notebook should be used for review and figure generation, while the core script remains the reproducible processing engine.",
     ]
     for paragraph in info_paragraphs:
         ctk.CTkLabel(info_card, text=paragraph, font=font_label, text_color=colors["text"], justify="left", wraplength=1050, anchor="w").pack(anchor="w", fill="x", padx=18, pady=(0, 12))
-    ctk.CTkLabel(info_card, text="Notebook file", font=font_card_title, text_color=colors["text"], anchor="w").pack(anchor="w", padx=18, pady=(8, 8))
-    ctk.CTkLabel(info_card, text=str(_THIS_DIR / "jn_04_02_fraction_visualization_notebook.ipynb"), font=font_mono, text_color=colors["muted"], justify="left", wraplength=1050, anchor="w").pack(anchor="w", fill="x", padx=18, pady=(0, 18))
 
     log_panel = ctk.CTkFrame(log_tab, fg_color=colors["card"], border_color=colors["border"], border_width=1, corner_radius=16)
     log_panel.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)

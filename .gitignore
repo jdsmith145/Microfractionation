@@ -37,5 +37,3 @@ Thumbs.db
 # Keep bundled synthetic examples tracked
 !example_data/
 !example_data/**
-!scripts/examples/
-!scripts/examples/**
