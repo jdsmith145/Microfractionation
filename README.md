@@ -38,7 +38,7 @@ MZmine is required for the batch runner step, but it is not bundled with this re
 
 1. Open the official MZmine 4.7.8 release page: https://github.com/mzmine/mzmine/releases/tag/v4.7.8
 2. Download the Windows portable package.
-3. Unzip it directly inside the `microfractionation` folder.
+3. Unzip it directly inside the `Microfractionation` folder.
 4. Keep the folder name as `mzmine_Windows_portable_4.7.8`.
 5. Confirm that this file exists: `mzmine_Windows_portable_4.7.8/mzmine_console.exe`.
 

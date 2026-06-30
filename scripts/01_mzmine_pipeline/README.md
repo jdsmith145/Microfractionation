@@ -2,7 +2,7 @@
 
 ## MZmine 4.7.8 Portable Requirement
 
-This step runs `mzmine_console.exe`, but MZmine is not bundled with the repository. Download MZmine 4.7.8 portable from https://github.com/mzmine/mzmine/releases/tag/v4.7.8, unzip it into the top-level `microfractionation` folder, and keep the folder name `mzmine_Windows_portable_4.7.8`. The expected executable is `mzmine_Windows_portable_4.7.8/mzmine_console.exe`.
+This step runs `mzmine_console.exe`, but MZmine is not bundled with the repository. Download MZmine 4.7.8 portable from https://github.com/mzmine/mzmine/releases/tag/v4.7.8, unzip it into the top-level `Microfractionation` folder, and keep the folder name `mzmine_Windows_portable_4.7.8`. The expected executable is `mzmine_Windows_portable_4.7.8/mzmine_console.exe`.
 
 ## Purpose
 

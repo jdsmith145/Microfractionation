@@ -502,7 +502,7 @@ def main() -> int:
     labeled(run_card, "Standard complete-table output", complete_csv, 5, "Standardized CSV path where MZmine should write the complete HPLC feature table. The next filtering step reads this path automatically, so keep it consistent unless you are recovering a manual run.", browse=lambda: browse_file(complete_csv, "Select complete feature table CSV", [("CSV file", "*.csv"), ("All files", "*.*")]))
     labeled(run_card, "Standard fraction-output folder", fraction_dir, 6, "Standardized folder where MZmine should write fraction CSV files. The filtering step reads frac_*.csv files from this folder automatically.", browse=lambda: browse_dir(fraction_dir, "Select fraction CSV folder"))
 
-    mzmine_card = card(main_frame, "MZmine console settings", "Use mzmine_console.exe, not the graphical mzmine.exe. Recommended setup: download MZmine 4.7.8 portable from GitHub and unzip it directly into the microfractionation folder.", visible=not bool(project_samples))
+    mzmine_card = card(main_frame, "MZmine console settings", "Use mzmine_console.exe, not the graphical mzmine.exe. Recommended setup: download MZmine 4.7.8 portable from GitHub and unzip it directly into the Microfractionation folder.", visible=not bool(project_samples))
     if project_samples:
         setup_cards.append(mzmine_card)
     labeled(mzmine_card, "MZmine console", mzmine_exe, 2, "Path to mzmine_console.exe. The launcher expects the MZmine 4.7.8 portable release at mzmine_Windows_portable_4.7.8/mzmine_console.exe unless you choose another location.", browse=lambda: browse_file(mzmine_exe, "Select mzmine_console.exe", [("MZmine console", "mzmine_console.exe"), ("Executable", "*.exe"), ("All files", "*.*")]))

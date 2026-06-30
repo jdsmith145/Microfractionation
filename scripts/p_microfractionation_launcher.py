@@ -391,7 +391,7 @@ class Launcher(ctk.CTk):
             mzmine_setup,
             text=(
                 "Before running the MZmine steps, download the MZmine 4.7.8 portable release from GitHub, "
-                f"unzip it into the microfractionation folder, and keep the folder name {MZMINE_PORTABLE_DIR}. "
+                f"unzip it into the Microfractionation folder, and keep the folder name {MZMINE_PORTABLE_DIR}. "
                 f"The launcher expects {MZMINE_CONSOLE_RELATIVE}."
             ),
             text_color=COLORS["muted"],
@@ -443,7 +443,7 @@ class Launcher(ctk.CTk):
         ctk.CTkLabel(label_frame, text="MZmine console", text_color=COLORS["muted"]).pack(side="left")
         self._help(
             label_frame,
-            "Path to mzmine_console.exe. The recommended setup is the MZmine 4.7.8 portable folder unzipped directly inside the microfractionation folder.",
+            "Path to mzmine_console.exe. The recommended setup is the MZmine 4.7.8 portable folder unzipped directly inside the Microfractionation folder.",
         ).pack(side="left", padx=(8, 0))
         mz_entry = self._entry(card, str(self.config_data.setdefault("mzmine", {}).get("portable_console", MZMINE_CONSOLE_RELATIVE)))
         mz_entry.grid(row=row, column=1, sticky="ew", padx=(0, 10), pady=6)
@@ -1294,7 +1294,7 @@ class Launcher(ctk.CTk):
 
     def open_mzmine_download_page(self) -> None:
         webbrowser.open(MZMINE_RELEASE_URL)
-        self.status_text.set("Opened the official MZmine 4.7.8 release page. Download the portable package and unzip it into the microfractionation folder.")
+        self.status_text.set("Opened the official MZmine 4.7.8 release page. Download the portable package and unzip it into the Microfractionation folder.")
 
     def check_mzmine_setup(self) -> None:
         expected = project_root() / MZMINE_CONSOLE_RELATIVE
